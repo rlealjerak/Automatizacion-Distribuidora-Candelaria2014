@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from adc_backend.config import get_settings
+from adc_backend.modules.tools.router import router as tools_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -45,3 +46,6 @@ app = FastAPI(
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+app.include_router(tools_router)

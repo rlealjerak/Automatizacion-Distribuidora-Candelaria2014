@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     keepa_secret_name: str = ""
     db_secret_name: str = ""  # RDS-managed master user secret
 
+    # Non-secret: this seller's own Amazon Selling Partner ID, needed for
+    # the SP-API listing-restrictions check (it's scoped per-seller, not
+    # just per-ASIN). Not a credential - just an account identifier.
+    sp_api_seller_id: str = ""
+
     # Non-secret DB connection info; password comes from db_secret_name at runtime.
     db_host: str = ""
     db_port: int = 5432
