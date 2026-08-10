@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 from functools import lru_cache
+from urllib.parse import quote_plus
 
 import boto3
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -43,6 +44,12 @@ class Settings(BaseSettings):
     db_name: str = "adc"
     db_username: str = "adc_admin"
 
+    # Local dev / CI escape hatch only: a full connection URL, used as-is if
+    # set. Lets local work (Docker Postgres, no AWS creds needed) happen
+    # without faking a Secrets Manager secret. Must stay unset in any real
+    # environment - if it's set, db_secret_name below is never consulted.
+    database_url: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:
@@ -67,3 +74,27 @@ def get_secret(secret_name: str) -> dict:
         raise ValueError("secret_name must be set (check environment configuration)")
     response = _secrets_client().get_secret_value(SecretId=secret_name)
     return json.loads(response["SecretString"])
+
+
+def get_database_url() -> str:
+    """
+    Build the SQLAlchemy connection URL.
+
+    Local dev / CI: set DATABASE_URL directly (see .env.example) and this
+    returns it unchanged - no AWS credentials needed.
+
+    Everywhere else: db_host/port/name/username come from plain settings,
+    and the password is fetched fresh from Secrets Manager on every call
+    (RDS rotates it automatically - never cache this beyond one call's
+    lifetime). The RDS-managed master user secret has a `password` key
+    alongside `username`, `host`, etc.
+    """
+    settings = get_settings()
+    if settings.database_url:
+        return settings.database_url
+
+    password = get_secret(settings.db_secret_name)["password"]
+    return (
+        f"postgresql+psycopg2://{quote_plus(settings.db_username)}:{quote_plus(password)}"
+        f"@{settings.db_host}:{settings.db_port}/{settings.db_name}"
+    )

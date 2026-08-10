@@ -1,0 +1,25 @@
+# Local-dev-only Postgres for verifying the schema/migrations without any
+# AWS credentials. Not used anywhere else - re-verify against real RDS once
+# infra/ is applied (see CLAUDE.md status notes).
+#
+# Host port 5433, not 5432: an unrelated project's Postgres container
+# already occupies 5432 on this machine.
+#
+# The password below is a disposable local-only value with no relation to
+# any real credential and is never used outside this throwaway container -
+# not an exception to "never hardcode credentials", since it protects
+# nothing. Flagged in README for visibility.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: adc
+      POSTGRES_USER: adc_admin
+      POSTGRES_PASSWORD: localdev_only_not_a_secret
+    ports:
+      - "5433:5432"
+    volumes:
+      - adc_local_pgdata:/var/lib/postgresql/data
+
+volumes:
+  adc_local_pgdata:
