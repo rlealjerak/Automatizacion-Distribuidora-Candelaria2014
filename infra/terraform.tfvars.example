@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars and adjust if needed. Every value here has a
+# sensible default in variables.tf - this file only needs entries you want
+# to override.
+
+project_name = "adc"
+environment  = "prod"
+aws_region   = "us-east-1"

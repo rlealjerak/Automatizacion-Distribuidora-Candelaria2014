@@ -1,0 +1,49 @@
+[tool.poetry]
+name = "adc-backend"
+version = "0.1.0"
+description = "Distribuidora Candelaria 2014 LLC - supplier list automation backend"
+authors = ["Distribuidora Candelaria 2014 LLC"]
+package-mode = false
+
+[tool.poetry.dependencies]
+# Local dev interpreter can be newer (e.g. 3.14) - the Docker image pins
+# 3.12 explicitly for reproducible deploys, so this range just needs to
+# not reject whatever's installed locally.
+python = ">=3.11,<3.15"
+fastapi = "^0.115.0"
+uvicorn = { extras = ["standard"], version = "^0.32.0" }
+pydantic-settings = "^2.6.0"
+boto3 = "^1.35.0"
+sqlalchemy = "^2.0.36"
+alembic = "^1.13.3"
+psycopg2-binary = "^2.9.10"
+pdfplumber = "^0.11.4"
+openpyxl = "^3.1.5"
+rapidfuzz = "^3.10.1"
+python-multipart = "^0.0.17"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.0"
+httpx = "^0.27.0"
+ruff = "^0.7.0"
+reportlab = "^4.2.5"  # test-only: generates real PDF tables to verify parse_pdf against, not a runtime dep
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# B008 (function call in argument default) flags FastAPI's required
+# `Depends(get_db)` pattern as if it were an accidental mutable-default
+# bug - it isn't, it's how FastAPI's dependency injection works. Ignoring
+# project-wide rather than a `# noqa` on every one of ~15 route handlers.
+ignore = ["B008"]
+
+[tool.pytest.ini_options]
+# package-mode = false above means the local package isn't pip-installed,
+# so tests need src/ on the path explicitly.
+pythonpath = ["src"]
