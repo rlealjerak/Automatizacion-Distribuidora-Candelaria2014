@@ -169,7 +169,7 @@ owner must be able to see *why*, not just the label.
 
 ---
 
-## Current status (updated 2026-08-06)
+## Current status (updated 2026-08-07)
 
 **Steps 3-12 (the entire remaining MVP pipeline) are built, at the user's
 explicit direction to implement the full remaining build order in one
@@ -193,11 +193,30 @@ a same-brand-false-positive in match scoring, a stale-confidence gap in
 review routing), is in
 `docs/decisions/0004-build-steps-3-12.md`.
 
-**Next, once real SP-API/Keepa credentials exist:** populate the real
-secrets and run the pipeline against live data for the first time - this
-is the actual test that steps 5-8 work, not just that their mocks pass.
-`infra/` itself still needs to be applied to real AWS - see the next
-status block below for that.
+**Infra: fully applied as of 2026-08-07.** Every resource `infra/`
+defines now exists for real in AWS (account `617464676572`, `us-east-1`)
+— VPC/networking, RDS, S3, both Secrets Manager placeholder secrets,
+SQS+DLQ, ECR, the ECS cluster, and both IAM roles with policies.
+`terraform plan` reports "No changes" against 42 tracked resources.
+Getting there took two more rounds of IAM permission gaps (each found via
+a real apply attempt, not guessed) plus one genuine account-level
+discovery: **this AWS account is on some kind of free-tier/restricted
+plan** that rejected RDS's backup retention period outright — worked
+around by setting it to `0` (no automated backups) for now, explicitly
+flagged in `modules/rds/main.tf` as needing revisiting (same category as
+the already-flagged `deletion_protection`) before this holds real data
+with no backup recovery point otherwise. Full narrative in
+`docs/decisions/0003-infra-apply-findings.md`.
+
+**Next:** populate the real SP-API/Keepa secrets (`aws secretsmanager
+put-secret-value`, see `infra/README.md`) and run the pipeline against
+live data for the first time — this is the actual test that steps 5-8
+work, not just that their mocks pass. Also worth resolving before real
+data exists: raise the backup-retention restriction above (or otherwise
+address whatever plan limit caused it), and flip `deletion_protection`
+once this holds anything real. An ECS task definition/service is still
+the one piece of `infra/` not built — add it once there's a container
+image worth deploying.
 
 ---
 

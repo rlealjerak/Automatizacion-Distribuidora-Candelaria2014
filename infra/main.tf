@@ -43,6 +43,7 @@ module "rds" {
   db_username              = var.db_username
   deletion_protection      = var.db_deletion_protection
   skip_final_snapshot      = var.db_skip_final_snapshot
+  backup_retention_period  = var.db_backup_retention_period
 }
 
 module "ecr" {

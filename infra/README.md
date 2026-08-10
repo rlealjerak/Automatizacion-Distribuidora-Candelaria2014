@@ -20,6 +20,10 @@ terraform plan
 terraform apply
 ```
 
+State locking is Terraform's native S3 lockfile support (`use_lockfile`,
+Terraform >= 1.10) — no DynamoDB table, since the IAM user used to apply
+this has no `dynamodb:*` permissions (confirmed via a real apply attempt).
+
 Requires AWS CLI credentials configured locally (`aws configure` or an
 SSO profile) with permission to create the resources above.
 
@@ -41,6 +45,21 @@ aws secretsmanager put-secret-value \
 The RDS master password is auto-generated and rotated by AWS — retrieve it
 via `module.rds.master_user_secret_arn` / the `rds_master_secret_arn`
 output, never set it manually.
+
+## IAM permissions needed to apply this
+
+The `claude-code` IAM user's policy, as originally granted, covered S3,
+Secrets Manager, and SQS only. Getting a full `terraform apply` to
+succeed took three rounds of real `AccessDeniedException`s (EC2/VPC, IAM
+role creation, ECS, ECR, CloudWatch Logs, and a couple of narrowly-scoped
+gaps found on refresh - see docs/decisions/0003-infra-apply-findings.md
+for the full narrative). `claude-code-iam-policy.json` in this directory
+is the final, complete set of permissions that got the apply to succeed -
+scoped to this project's resource name prefix (`adc-*`) and region
+(`us-east-1`) where the AWS API supports it. Useful as a reference if
+this ever needs reproducing (e.g. a second environment) - an account
+admin attaches it, not `claude-code` itself (it has no
+`iam:PutUserPolicy` on itself either).
 
 ## Cost note
 

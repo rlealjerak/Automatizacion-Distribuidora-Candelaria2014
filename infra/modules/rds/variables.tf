@@ -37,3 +37,8 @@ variable "deletion_protection" {
 variable "skip_final_snapshot" {
   type = bool
 }
+
+variable "backup_retention_period" {
+  description = "Days of automated backups to retain. See main.tf for why this defaults to 0."
+  type        = number
+}

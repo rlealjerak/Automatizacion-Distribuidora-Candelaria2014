@@ -37,7 +37,17 @@ resource "aws_db_instance" "main" {
   publicly_accessible    = false
   multi_az                = false # MVP: single-AZ to control cost. Revisit if downtime risk becomes unacceptable.
 
-  backup_retention_period = 7
+  # 0 (no automated backups), not a real target - this AWS account rejected
+  # any nonzero value with "FreeTierRestrictionError: The specified backup
+  # retention period exceeds the maximum available to free tier customers",
+  # confirmed via a real apply attempt (the account is evidently on some
+  # kind of free-tier/restricted plan - AWS didn't report what the actual
+  # allowed max is, just that >0 - possibly untested values - exceeded it).
+  # Same category as deletion_protection/skip_final_snapshot below: fine
+  # while iterating pre-launch, MUST be revisited (raise this and/or
+  # upgrade the account's plan) before this holds real data anyone would
+  # be upset to lose without a recovery point.
+  backup_retention_period = var.backup_retention_period
   deletion_protection     = var.deletion_protection
   skip_final_snapshot     = var.skip_final_snapshot
 

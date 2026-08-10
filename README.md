@@ -77,8 +77,15 @@ tested against mocks shaped like each API's documented contract, not
 recorded real responses. See `modules/amazon/sp_api_client.py` and
 `keepa_client.py`'s module docstrings.
 
-`infra/` still needs to be applied against real AWS - nothing here has
-been provisioned yet at this point.
+**Infra status:** fully applied as of 2026-08-07 — every resource in
+`infra/` exists for real in AWS (`terraform plan` reports "No changes"
+against 42 resources), including RDS. Getting there surfaced a real
+account-level constraint (this AWS account rejected RDS's default backup
+retention period as a free-tier/plan restriction - worked around with
+`backup_retention_period = 0` for now, flagged for revisit before real
+data exists). See `docs/decisions/0003-infra-apply-findings.md`. An ECS
+task definition/service is still the one piece not built - comes once
+there's a container image worth deploying.
 
 112 pytest tests pass (`./.venv/Scripts/pytest -v`) - 82 need no external
 services, 30 run against real local Postgres and/or the real
