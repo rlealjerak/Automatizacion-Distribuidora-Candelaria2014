@@ -47,10 +47,18 @@ class AmazonDataSnapshot(Base):
     fba_fee: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     other_fees: Mapped[dict | None] = mapped_column(JSONB)  # breakdown of any remaining fee components
 
-    # Sales / rank (Keepa)
+    # Sales / rank (Keepa). estimated_monthly_sales stays null for now -
+    # Keepa doesn't report actual units sold, and this system doesn't
+    # fabricate a modeled figure (see keepa_client.py). sales_rank_drops_*
+    # is Keepa's own documented velocity proxy and what the rule engine
+    # (step 8) actually evaluates against CLAUDE.md's 30/60/90-day velocity
+    # rule - added after the rest of this table, once building the Keepa
+    # client (step 6) surfaced what data was actually available.
     estimated_monthly_sales: Mapped[int | None]
     sales_rank: Mapped[int | None]
     sales_rank_category: Mapped[str | None]
+    sales_rank_drops_30d: Mapped[int | None]
+    sales_rank_drops_90d: Mapped[int | None]
 
     # Risk factors
     seller_count: Mapped[int | None]
