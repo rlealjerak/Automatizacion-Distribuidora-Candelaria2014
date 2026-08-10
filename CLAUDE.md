@@ -136,23 +136,25 @@ owner must be able to see *why*, not just the label.
 2. ✅ Database schema: suppliers, list runs, raw line items, product
    matches (confidence + status), Amazon data snapshots (per run), 
    classification results (rule trace), manual review queue.
-3. ⬜ File ingestion: upload handling, original file preservation to S3,
+3. ✅ File ingestion: upload handling, original file preservation to S3,
    PDF + Excel/CSV parsing.
-4. ⬜ Column/field normalization with confidence-scored proposed mapping,
+4. ✅ Column/field normalization with confidence-scored proposed mapping,
    owner confirmation step.
-5. ⬜ SP-API integration (catalog search for text matching, pricing/fees,
-   restrictions/gated status).
-6. ⬜ Keepa integration (price history, sales rank).
-7. ⬜ Matching engine: text/brand matching against Amazon catalog,
+5. ✅ SP-API integration (catalog search for text matching, pricing/fees,
+   restrictions/gated status). **Code-complete, unverified against live
+   SP-API — see status notes below.**
+6. ✅ Keepa integration (price history, sales rank). **Code-complete,
+   unverified against live Keepa — see status notes below.**
+7. ✅ Matching engine: text/brand matching against Amazon catalog,
    confidence scoring, persistent mapping table.
-8. ⬜ Rule engine: configurable rules from the table above, classification
+8. ✅ Rule engine: configurable rules from the table above, classification
    output with reasoning trace.
-9. ⬜ Manual review queue logic (low-confidence matches, promo blocks,
+9. ✅ Manual review queue logic (low-confidence matches, promo blocks,
    bundle SKUs, gated-pending items, any ambiguous case).
-10. ⬜ Tool-callable interface for OpenClaw to trigger runs, check status,
+10. ✅ Tool-callable interface for OpenClaw to trigger runs, check status,
     relay approvals.
-11. ⬜ Export and run-history/comparison features.
-12. ⬜ Tests for matching logic and rule engine specifically.
+11. ✅ Export and run-history/comparison features.
+12. ✅ Tests for matching logic and rule engine specifically.
 
 ## Working style
 
@@ -167,7 +169,39 @@ owner must be able to see *why*, not just the label.
 
 ---
 
-## Current status (updated 2026-08-04)
+## Current status (updated 2026-08-06)
+
+**Steps 3-12 (the entire remaining MVP pipeline) are built, at the user's
+explicit direction to implement the full remaining build order in one
+pass** — a deliberate, acknowledged departure from this file's own "one
+piece at a time" working style above, not an oversight. 112 pytest tests
+pass (82 pure-logic, no external services needed; 30 against real local
+Postgres and/or the real `adc-prod-supplier-files` S3 bucket).
+
+**The one caveat that matters most:** SP-API and Keepa clients (steps
+5-6) are code-complete against each API's documented contract and tested
+against hand-written mocks, but have **never made a real network call** —
+only placeholder credentials exist in Secrets Manager. Everything
+downstream that depends on live pricing/fees/restrictions/sales data
+(matching, the rule engine's financial math, the full run-processing
+pipeline) is exercised via stub clients standing in for the real thing.
+The first real SP-API/Keepa call, whenever real credentials are entered,
+is the actual verification of that half of the system — not something to
+assume from tests passing. Full reasoning, plus several real bugs found
+and fixed along the way (a noise-column false-positive in column mapping,
+a same-brand-false-positive in match scoring, a stale-confidence gap in
+review routing), is in
+`docs/decisions/0004-build-steps-3-12.md`.
+
+**Next, once real SP-API/Keepa credentials exist:** populate the real
+secrets and run the pipeline against live data for the first time - this
+is the actual test that steps 5-8 work, not just that their mocks pass.
+`infra/` itself still needs to be applied to real AWS - see the next
+status block below for that.
+
+---
+
+## Status as of step 2 (2026-08-04) — earlier session, kept for history
 
 **Step 2 is complete and locally verified:**
 - SQLAlchemy 2.0 models + Alembic migrations for all 9 core tables

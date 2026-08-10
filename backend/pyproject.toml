@@ -36,6 +36,13 @@ build-backend = "poetry.core.masonry.api"
 line-length = 100
 target-version = "py312"
 
+[tool.ruff.lint]
+# B008 (function call in argument default) flags FastAPI's required
+# `Depends(get_db)` pattern as if it were an accidental mutable-default
+# bug - it isn't, it's how FastAPI's dependency injection works. Ignoring
+# project-wide rather than a `# noqa` on every one of ~15 route handlers.
+ignore = ["B008"]
+
 [tool.pytest.ini_options]
 # package-mode = false above means the local package isn't pip-installed,
 # so tests need src/ on the path explicitly.
