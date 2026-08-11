@@ -1,16 +1,16 @@
 """
 Amazon Selling Partner API (SP-API) client.
 
-*** UNVERIFIED AGAINST LIVE SP-API. *** Built to the documented SP-API
-contract (LWA bearer-token auth, REST endpoints below), but this project
-has no real SP-API credentials yet - only a placeholder secret exists in
-Secrets Manager (see infra/modules/secrets). CLAUDE.md's core principle is
-"live data, deterministic logic" - this client is the deterministic
-plumbing; it has never actually exchanged a byte with Amazon. Test
-coverage here is against mocked HTTP responses shaped like SP-API's
-documented schema, not recorded real responses. Whoever plugs in real
-credentials should treat the first live call as the actual verification of
-this module, not assume it from the tests passing.
+*** PARTIALLY VERIFIED AGAINST LIVE SP-API (as of 2026-08-10). *** Real
+LWA credentials are now stored in Secrets Manager, and `_get_access_token`
++ `search_catalog_items` have both been exercised against the real API -
+a real LWA token exchange and a real catalog search returning real
+Amazon products. `get_pricing`, `get_fees_estimate`, and
+`get_listing_restrictions` have NOT been called against live data yet -
+still only verified against mocked HTTP responses shaped like SP-API's
+documented schema, same caveat as before for those three specifically.
+Whoever calls them for the first time for real should treat that as the
+actual verification, not assume it from the mocked tests passing.
 
 Scope: catalog search (for text/brand matching, step 7), pricing/buy box,
 fees estimate, and restrictions/gated status - the four SP-API capabilities
