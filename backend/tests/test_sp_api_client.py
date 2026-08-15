@@ -137,6 +137,14 @@ def test_get_fees_estimate_separates_referral_and_fba():
     def handler(request: httpx.Request) -> httpx.Response:
         if "amazon.com/auth" in str(request.url):
             return _lwa_response(request)
+        # Regression test: without IsAmazonFulfilled=True, SP-API silently
+        # estimates merchant-fulfilled fees and never returns an FBA fee
+        # line item at all (found live 2026-08-15 - fba_fee came back None
+        # on every real ASIN tested until this was set).
+        import json as _json
+
+        request_body = _json.loads(request.content)
+        assert request_body["FeesEstimateRequest"]["IsAmazonFulfilled"] is True
         return httpx.Response(
             200,
             json={
@@ -174,6 +182,31 @@ def test_get_listing_restrictions_distinguishes_gated_from_hard_restricted():
     result = client.get_listing_restrictions("B000000001", seller_id="A1SELLER")
     assert result.is_gated is True
     assert result.is_restricted is False
+    assert result.approved_for_seller is False
+
+
+def test_get_listing_restrictions_not_eligible_is_ambiguous_not_hard_restricted():
+    """NOT_ELIGIBLE is the reason code SP-API actually returns in practice
+    (found live 2026-08-15) - and the SAME code covers both a permanent
+    restriction and a clearable brand-authorization gate on the real ASIN
+    it was found on. Per an explicit user decision, this must route to
+    manual review (ambiguous_restriction), not silently hard-exclude a
+    possibly-obtainable product nor silently show it as clean."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "amazon.com/auth" in str(request.url):
+            return _lwa_response(request)
+        assert request.url.params["conditionType"] == "new_new"
+        return httpx.Response(
+            200,
+            json={"restrictions": [{"marketplaceId": "ATVPDKIKX0DER", "reasons": [{"reasonCode": "NOT_ELIGIBLE"}]}]},
+        )
+
+    client = _client_with_transport(handler)
+    result = client.get_listing_restrictions("B000000001", seller_id="A1SELLER")
+    assert result.is_restricted is False
+    assert result.is_gated is False
+    assert result.ambiguous_restriction is True
     assert result.approved_for_seller is False
 
 

@@ -1,16 +1,32 @@
 """
 Amazon Selling Partner API (SP-API) client.
 
-*** PARTIALLY VERIFIED AGAINST LIVE SP-API (as of 2026-08-10). *** Real
-LWA credentials are now stored in Secrets Manager, and `_get_access_token`
-+ `search_catalog_items` have both been exercised against the real API -
-a real LWA token exchange and a real catalog search returning real
-Amazon products. `get_pricing`, `get_fees_estimate`, and
-`get_listing_restrictions` have NOT been called against live data yet -
-still only verified against mocked HTTP responses shaped like SP-API's
-documented schema, same caveat as before for those three specifically.
-Whoever calls them for the first time for real should treat that as the
-actual verification, not assume it from the mocked tests passing.
+*** FULLY LIVE-VERIFIED (as of 2026-08-15). *** All four capabilities -
+search_catalog_items (2026-08-10), get_pricing, get_fees_estimate, and
+get_listing_restrictions (2026-08-15) - have now been called against the
+real API with real credentials and returned real data. That final round
+of live testing found and fixed two real, load-bearing bugs the mocked
+tests couldn't catch because the mocks were shaped by the same
+assumptions that turned out wrong:
+
+1. get_fees_estimate never sent IsAmazonFulfilled=True - SP-API silently
+   estimated merchant-fulfilled fees instead of FBA fees, so fba_fee came
+   back None on every real ASIN tested despite this being an FBA-only
+   business. Fixed by adding that field to the request.
+2. get_listing_restrictions didn't recognize NOT_ELIGIBLE at all (the
+   code guessed at ASIN_NOT_ELIGIBLE/RESTRICTED_PRODUCT, neither of which
+   SP-API actually returned) and didn't scope the request to a condition
+   type - so a genuinely restricted real ASIN came back as neither
+   restricted nor gated. Fixed by scoping to conditionType=new_new (this
+   system only ever sources new product). NOT_ELIGIBLE turned out to be
+   more nuanced than a simple hard-restriction code, though: the SAME
+   code appeared on the same ASIN meaning both "permanently restricted"
+   and "you can become an authorized seller by contacting the brand" -
+   Amazon doesn't distinguish these at the reason-code level. Rather than
+   guess from the message text (not a stable contract), NOT_ELIGIBLE gets
+   its own ambiguous_restriction flag and routes to manual review - a
+   user decision made explicitly after seeing this live evidence, not a
+   silent engineering call. See RestrictionsResult and rules/engine.py.
 
 Scope: catalog search (for text/brand matching, step 7), pricing/buy box,
 fees estimate, and restrictions/gated status - the four SP-API capabilities
@@ -74,6 +90,16 @@ class RestrictionsResult:
     is_restricted: bool
     is_gated: bool
     approved_for_seller: bool  # only meaningful if is_gated
+    # True when SP-API returned NOT_ELIGIBLE - a reason code confirmed live
+    # (2026-08-15) to cover BOTH a permanent hard restriction and a
+    # clearable brand-authorization gate, with no reliable way to tell
+    # them apart from the reason code alone (the human-readable message
+    # text differs, but that's not a stable API contract to parse against).
+    # Per CLAUDE.md's "any genuinely ambiguous case -> manual review, never
+    # guess": this does NOT set is_restricted, so it isn't hard-excluded,
+    # but the rule engine must route it to manual review rather than
+    # treating it as a clean, sellable product either.
+    ambiguous_restriction: bool
     raw_response: dict
 
 
@@ -193,6 +219,13 @@ class SPAPIClient:
                     "MarketplaceId": marketplace_id,
                     "PriceToEstimateFees": {"ListingPrice": {"CurrencyCode": "USD", "Amount": float(price)}},
                     "Identifier": f"fee-estimate-{asin}",
+                    # This system exists for an FBA wholesale business (see CLAUDE.md) -
+                    # every product it evaluates is assumed FBA. Without this, SP-API
+                    # silently defaults to merchant-fulfilled and never returns an FBA
+                    # fee line item at all (found live: fba_fee came back None on every
+                    # real ASIN tested until this was added - not absent data, a wrong
+                    # request).
+                    "IsAmazonFulfilled": True,
                 }
             },
         )
@@ -222,17 +255,50 @@ class SPAPIClient:
         body = self._request(
             "GET",
             "/listings/2021-08-01/restrictions",
-            params={"asin": asin, "sellerId": seller_id, "marketplaceIds": marketplace_id},
+            # conditionType scopes the response to one condition. Without it,
+            # SP-API returns a separate restriction entry PER condition type
+            # (new_new, used_good, collectible_like_new, ...) and this
+            # system - which only ever sources new wholesale product, same
+            # assumption get_pricing makes with ItemCondition=New - must not
+            # aggregate reason codes across conditions it doesn't sell in
+            # (found live: a real ASIN was restricted in every condition,
+            # but scoping still matters in general - a used-only restriction
+            # must not exclude an otherwise-sellable-as-new item).
+            params={
+                "asin": asin,
+                "sellerId": seller_id,
+                "marketplaceIds": marketplace_id,
+                "conditionType": "new_new",
+            },
         )
         restrictions = body.get("restrictions", [])
         # SP-API returns an empty list when there's no restriction at all.
         # A non-empty list means SOME reason exists - could be a hard
-        # restriction (e.g. restricted category) or a gate the seller can
-        # apply to clear. Reason codes distinguish the two; CLAUDE.md
-        # treats them very differently (hard exclude vs. surface-if-strong),
-        # so this must not collapse them into one flag.
+        # restriction (e.g. restricted category), a gate the seller can
+        # apply to clear, or (see ambiguous_reasons below) both at once
+        # depending on category. Reason codes are meant to distinguish
+        # these; CLAUDE.md treats them very differently (hard exclude vs.
+        # surface-if-strong vs. needs-a-human), so this must not collapse
+        # them into one flag.
+        #
+        # Confirmed live 2026-08-15 against a real, currently-restricted
+        # ASIN. ASIN_NOT_ELIGIBLE/RESTRICTED_PRODUCT were the original
+        # guessed hard-restriction codes and have still never been seen in
+        # a real response - kept in case another category uses them.
+        # APPROVAL_REQUIRED (clean gate) also hasn't been seen live yet.
+        # NOT_ELIGIBLE is what actually came back, and turned out to cover
+        # two different real situations under the exact same code: this
+        # ASIN's collectible conditions all said "we are currently not
+        # accepting applications" (permanent), while its new_new condition
+        # said "you are not approved... contact the brand owner to become
+        # an authorized seller" (a clearable brand gate) - same reasonCode
+        # both times. Since the code alone can't disambiguate and the
+        # message text isn't a stable contract to parse, NOT_ELIGIBLE
+        # deliberately does NOT set is_restricted - it's routed to manual
+        # review instead (see ambiguous_restriction below).
         gated_reasons = {"APPROVAL_REQUIRED"}
         hard_restricted_reasons = {"ASIN_NOT_ELIGIBLE", "RESTRICTED_PRODUCT"}
+        ambiguous_reasons = {"NOT_ELIGIBLE"}
 
         reason_codes = {
             reason.get("reasonCode")
@@ -244,6 +310,7 @@ class SPAPIClient:
             asin=asin,
             is_restricted=bool(reason_codes & hard_restricted_reasons),
             is_gated=bool(reason_codes & gated_reasons),
+            ambiguous_restriction=bool(reason_codes & ambiguous_reasons),
             approved_for_seller=len(restrictions) == 0,
             raw_response=body,
         )

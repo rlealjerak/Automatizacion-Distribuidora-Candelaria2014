@@ -64,6 +64,12 @@ class AmazonDataSnapshot(Base):
     seller_count: Mapped[int | None]
     is_restricted: Mapped[bool | None] = mapped_column(Boolean)
     is_gated: Mapped[bool | None] = mapped_column(Boolean)
+    # NOT_ELIGIBLE from SP-API restrictions - confirmed live (2026-08-15)
+    # to cover both a permanent restriction and a clearable brand-approval
+    # gate under the identical reason code. Deliberately not folded into
+    # is_restricted/is_gated - see sp_api_client.py's RestrictionsResult
+    # and the rule engine's handling of this flag.
+    ambiguous_restriction: Mapped[bool | None] = mapped_column(Boolean)
     gated_approval_status: Mapped[GatedApprovalStatus] = mapped_column(
         Enum(GatedApprovalStatus, name="gated_approval_status"), default=GatedApprovalStatus.NOT_APPLICABLE
     )

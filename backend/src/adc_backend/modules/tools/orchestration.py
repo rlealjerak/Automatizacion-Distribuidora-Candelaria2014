@@ -153,6 +153,7 @@ def _fetch_and_store_snapshot(db: Session, run: ListRun, item: RawLineItem, asin
         other_fees=fees.other_fees,
         seller_count=pricing.seller_count,
         is_restricted=restrictions.is_restricted,
+        ambiguous_restriction=restrictions.ambiguous_restriction,
         is_gated=restrictions.is_gated,
         gated_approval_status=gated_status,
         sales_rank=keepa_snapshot.current_sales_rank if keepa_snapshot else None,

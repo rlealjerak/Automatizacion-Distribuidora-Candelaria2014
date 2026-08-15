@@ -71,6 +71,17 @@ def determine_review_reason(state: LineItemReviewState) -> tuple[ReviewReason, s
                     "owner must submit an invoice to Amazon and await approval before this is purchasable."
                 ),
             )
+        if state.classification_trace and any(
+            entry.get("rule") == "ambiguous_restriction_reason" for entry in state.classification_trace
+        ):
+            return (
+                ReviewReason.AMBIGUOUS_RESTRICTION,
+                (
+                    "SP-API's restriction reason (NOT_ELIGIBLE) is ambiguous - could be a permanent "
+                    "restriction or a clearable brand-authorization gate. Check the actual message text "
+                    "in the Amazon data snapshot before deciding."
+                ),
+            )
         return ReviewReason.OTHER, "Rule engine returned REVIEW - see the classification's rule_trace for the specific reason."
 
     return None
