@@ -229,13 +229,58 @@ flowing through as a literal very-low-velocity number instead of `None`
 (`_none_if_negative`); 112/112 tests still pass. Module docstring updated
 to reflect live-verified status.
 
-**Next:** SP-API's `get_pricing`, `get_fees_estimate`, and
-`get_listing_restrictions` are the one piece of steps 5-6 still
-unverified against live data (only `search_catalog_items` and now all of
-Keepa are) — see `sp_api_client.py` docstring. After that, a real
-end-to-end pipeline run against a real supplier list is the actual
-verification of steps 7-8's matching/rule engine against live numbers,
-not just mocks.
+**Update same day: SP-API fully live-verified, real bugs fixed, and a
+full real end-to-end pipeline run completed successfully.**
+
+`get_pricing`/`get_fees_estimate`/`get_listing_restrictions` all called
+live for the first time, against real ASINs. Two real, load-bearing bugs
+found and fixed (both now covered by regression tests, 116/116 passing):
+1. `get_fees_estimate` never sent `IsAmazonFulfilled=True` — SP-API
+   silently estimated merchant-fulfilled fees instead of FBA fees, so
+   `fba_fee` came back `None` on every real ASIN despite this being an
+   FBA-only business.
+2. `get_listing_restrictions` didn't scope to a condition type and didn't
+   recognize the reason code SP-API actually returns (`NOT_ELIGIBLE`) —
+   a genuinely restricted real ASIN came back as neither restricted nor
+   gated. Fixed by scoping to `conditionType=new_new`.
+
+A third finding wasn't a bug to silently fix — `NOT_ELIGIBLE` turned out
+to mean two different real things (permanent restriction vs. a clearable
+brand-authorization gate) under the *identical* reason code on the same
+ASIN. Per explicit user decision after seeing the live evidence, this now
+routes to manual review (new `ambiguous_restriction` flag threaded
+through `RestrictionsResult` → `AmazonDataSnapshot` → rule engine → review
+queue, migration `e64eb0eeb98c`) rather than guessing either direction.
+
+**Full real end-to-end pipeline run**, driven through the actual
+OpenClaw-facing HTTP API (not internal function calls) against real
+Postgres, real S3, real SP-API, and real Keepa — a synthetic-but-real
+5-row supplier list covering every special case CLAUDE.md calls out:
+a standard item with an ambiguous restriction (correctly landed in the
+review queue, full live reasoning trace confirmed in the DB), a standard
+item with clean live financials (correctly classified `NO_BUY` on real
+negative ROI), a display/bundle SKU, a tiered-promo-pricing block, and a
+row with no supplier item number. All five landed exactly where CLAUDE.md
+says they should. Column mapping, ASIN matching, live pricing/fees/
+restrictions/velocity, rule engine, and review-queue routing all worked
+together for real, for the first time.
+
+**One real deployment gap found and worth acting on before any real
+supplier list is run against production:** `seed_default_rules_config()`
+(`rules/config.py`) has never been run against real RDS — only ever
+against local dev Postgres in earlier test sessions. Without it,
+classification silently no-ops on every row (found live during this run;
+harmless in that it fails safe into "needs review," but it means zero
+`Buy`/`No-buy`/etc. output until someone runs this once). Test file used
+for the live run was cleaned up from the real `adc-prod-supplier-files`
+S3 bucket afterward (soft-deleted — versioning is on, per infra).
+
+**Next:** run `seed_default_rules_config()` against real RDS before the
+first real supplier list. After that, nothing in the MVP pipeline is
+still unverified against live data — the remaining build-order item is
+the ECS task definition/service (never built) to actually deploy this,
+plus the RDS `backup_retention_period`/`deletion_protection` flags still
+open from the infra-apply findings.
 
 ---
 
