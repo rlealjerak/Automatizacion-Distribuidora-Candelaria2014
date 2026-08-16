@@ -20,7 +20,17 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-config.set_main_option("sqlalchemy.url", get_database_url())
+# config.set_main_option() stores this through a configparser.ConfigParser,
+# which by default treats a literal "%" as the start of interpolation
+# syntax ("%(name)s") and raises ValueError on anything else - and the
+# real RDS-generated master password, once percent-encoded by
+# get_database_url()'s quote_plus(), is virtually guaranteed to contain
+# "%XX" sequences. Never caught locally (DATABASE_URL's hardcoded dev
+# password has no special characters to encode) - found live on the
+# first real deploy against actual RDS credentials (2026-08-16), where
+# it crashed migrations before the app ever started. "%%" is
+# configparser's own escape for a literal "%".
+config.set_main_option("sqlalchemy.url", get_database_url().replace("%", "%%"))
 
 target_metadata = Base.metadata
 

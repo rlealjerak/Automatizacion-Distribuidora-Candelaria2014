@@ -105,3 +105,15 @@ variable "container_port" {
   type        = number
   default     = 8000
 }
+
+variable "container_image_tag" {
+  description = "ECR image tag to deploy. The repo has immutable tags (see modules/ecr), so 'latest' can never actually be pushed twice - found live on the first real deploy (2026-08-16). Using explicit version tags (v1, v2, ...) for now; a real CI/deploy pipeline would use git-SHA tags instead, flagged not fixed for now."
+  type        = string
+  default     = "v2"
+}
+
+variable "sp_api_seller_id" {
+  description = "This project's own Amazon Selling Partner ID (merchant token) - non-secret, just an account identifier (see backend config.py). Confirmed live 2026-08-15 via a real SP-API fees-estimate response echoing it back."
+  type        = string
+  default     = "AGKTO8HZBBQC4"
+}
