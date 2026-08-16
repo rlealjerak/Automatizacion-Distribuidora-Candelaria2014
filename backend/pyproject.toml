@@ -21,10 +21,17 @@ pdfplumber = "^0.11.4"
 openpyxl = "^3.1.5"
 rapidfuzz = "^3.10.1"
 python-multipart = "^0.0.17"
+# Real runtime dependency, not dev-only - sp_api_client.py and
+# keepa_client.py both `import httpx` directly to make live SP-API/Keepa
+# calls. Was misclassified under the dev group below (masked locally
+# because README's manual pip-install list happens to include it
+# alongside real dev tools) until building the Docker image for the
+# first time (2026-08-15) with `poetry install --only main` surfaced a
+# real ModuleNotFoundError at container startup.
+httpx = "^0.27.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.0"
-httpx = "^0.27.0"
 ruff = "^0.7.0"
 reportlab = "^4.2.5"  # test-only: generates real PDF tables to verify parse_pdf against, not a runtime dep
 

@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from adc_backend.config import get_settings
+from adc_backend.modules.auth import require_api_key_dependency
 from adc_backend.modules.tools.router import router as tools_router
 
 logging.basicConfig(level=logging.INFO)
@@ -45,7 +46,11 @@ app = FastAPI(
 
 @app.get("/health")
 async def health() -> dict:
+    # Deliberately unauthenticated - the ALB target group health check
+    # hits this with no headers, and it exposes nothing sensitive.
     return {"status": "ok"}
 
 
-app.include_router(tools_router)
+# Every route below requires X-Api-Key - see modules/auth.py for why this
+# exists at all and what it does (and doesn't) protect against.
+app.include_router(tools_router, dependencies=[require_api_key_dependency])

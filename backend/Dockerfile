@@ -16,10 +16,15 @@ COPY pyproject.toml poetry.lock* ./
 RUN poetry install --no-root --only main
 
 COPY src ./src
+COPY alembic ./alembic
+COPY alembic.ini ./
+COPY entrypoint.sh ./
+RUN chmod +x entrypoint.sh
 
 EXPOSE 8000
 
-# Placeholder command — becomes real once main:app has actual routes beyond
-# the health check. Worker mode is a separate entrypoint (worker.py), run
-# as a separate ECS service/task once that exists.
-CMD ["uvicorn", "adc_backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Runs migrations + seeds the default rules config (both idempotent, safe
+# on every start - see entrypoint.sh) before starting the API. Worker mode
+# is a separate entrypoint (worker.py), run as a separate ECS
+# service/task, not through this CMD.
+CMD ["./entrypoint.sh"]

@@ -37,6 +37,26 @@ def client():
     return TestClient(app)
 
 
+def test_protected_route_rejects_missing_key_end_to_end(client, monkeypatch):
+    """Router-wiring-level check (not just the unit test in test_auth.py) -
+    proves the dependency is actually attached to real routes via
+    app.include_router(..., dependencies=[...]) in main.py, not just
+    defined and forgotten."""
+    from adc_backend.config import get_settings
+    from adc_backend.modules import auth
+
+    monkeypatch.setenv("API_KEY_SECRET_NAME", "adc/prod/api-key")
+    monkeypatch.setattr(auth, "get_secret", lambda name: {"api_key": "real-secret-key"})
+    get_settings.cache_clear()
+    auth._expected_api_key.cache_clear()
+    try:
+        response = client.get("/suppliers")
+        assert response.status_code == 401
+    finally:
+        get_settings.cache_clear()
+        auth._expected_api_key.cache_clear()
+
+
 @pytest.fixture
 def db_session():
     from adc_backend.db import models  # noqa: F401
