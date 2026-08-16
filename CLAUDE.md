@@ -169,6 +169,59 @@ owner must be able to see *why*, not just the label.
 
 ---
 
+## Current status (updated 2026-08-16)
+
+**This system is deployed and reachable for the first time ever.**
+`http://<alb_dns_name>/health` returns 200 from a real, running ECS
+Fargate task behind a real ALB — the one piece of `infra/` flagged as
+undone since the original apply is now built: `modules/alb` (new) +
+`modules/ecs_cluster`'s task definition/service (previously deferred).
+Full narrative of what it took: six real IAM permission rounds (ELB
+actions, two service-linked-role grants — one needed an explicit
+`aws iam create-service-linked-role`, ECS's own auto-create didn't
+reliably trigger — plus a few narrowly-scoped EC2/ECS gaps), all fixed
+in `infra/claude-code-iam-policy.json`; two real bugs from actually
+building and deploying the container for the first time (wrong CPU
+architecture - built on this arm64 Mac without `--platform linux/amd64`,
+Fargate couldn't pull it; and an alembic `configparser` interpolation
+crash on the real RDS password's percent-encoded characters, never
+caught locally since the dev password has none of those). Both fixed,
+both verified against the real deployment.
+
+**Before any of that, a security gap had to close first:** the API had
+*zero authentication* anywhere. Added a shared `X-Api-Key` header,
+enforced on every route except `/health` (`backend/src/adc_backend/
+modules/auth.py`), backed by a new `adc/prod/api-key` secret. Verified
+live: 401 without the header, 200 with the real key.
+
+**Also verified live, closing a gap flagged earlier the same day:**
+`seed_default_rules_config()` had never run against real RDS — it now
+runs automatically on every container start (`entrypoint.sh`, alongside
+`alembic upgrade head`, both idempotent), confirmed via real CloudWatch
+logs on the first real deploy: migrations ran, config seeded, classify
+is no longer a silent no-op in production.
+
+**Known, deliberately-flagged-not-fixed gap: no TLS.** The ALB is
+HTTP-only — no domain name or ACM certificate exists yet, so `X-Api-Key`
+currently travels in plaintext over the internet. Same category as the
+already-flagged RDS `backup_retention_period`/`deletion_protection`
+gaps — needs a real decision (domain + cert) before this carries
+anything beyond dev/test traffic, not something to silently accept
+long-term.
+
+**Also flagged, not blocking:** ECR has immutable tags (found live — a
+`:latest` re-push failed); `container_image_tag` now defaults to an
+explicit version (`v2`) bumped by hand each deploy. A real CI/deploy
+pipeline should use git-SHA tags instead.
+
+**Next:** decide on a domain + ACM cert for HTTPS before any real
+traffic; give OpenClaw the ALB DNS name + the real API key (out of band,
+never in a transcript) so it can actually call this backend; work out a
+deploy story better than "build/push/bump-a-tf-var by hand" (this
+session's process, fine for a first deploy, not for ongoing iteration).
+
+---
+
 ## Current status (updated 2026-08-15)
 
 **Dev machine changed: this project is now worked on from a Mac**
