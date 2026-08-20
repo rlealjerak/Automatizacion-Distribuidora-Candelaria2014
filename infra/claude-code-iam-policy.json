@@ -34,6 +34,7 @@
         "ec2:RevokeSecurityGroupEgress",
         "ec2:DescribeSecurityGroups",
         "ec2:DescribeSecurityGroupRules",
+        "ec2:GetSecurityGroupsForVpc",
         "ec2:DescribeAvailabilityZones",
         "ec2:DescribeNetworkInterfaces",
         "ec2:CreateTags",
@@ -95,15 +96,53 @@
         "ecs:CreateCluster",
         "ecs:DeleteCluster",
         "ecs:DescribeClusters",
+        "ecs:ListClusters",
         "ecs:TagResource",
         "ecs:ListTagsForResource",
         "ecs:RegisterTaskDefinition",
         "ecs:DeregisterTaskDefinition",
         "ecs:DescribeTaskDefinition",
+        "ecs:ListTaskDefinitions",
         "ecs:CreateService",
         "ecs:UpdateService",
         "ecs:DeleteService",
-        "ecs:DescribeServices"
+        "ecs:DescribeServices",
+        "ecs:ListTasks",
+        "ecs:DescribeTasks",
+        "ecs:RunTask",
+        "ecs:StopTask"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": { "aws:RequestedRegion": "us-east-1" }
+      }
+    },
+    {
+      "Sid": "ElbReadWrite",
+      "Effect": "Allow",
+      "Action": [
+        "elasticloadbalancing:CreateLoadBalancer",
+        "elasticloadbalancing:DeleteLoadBalancer",
+        "elasticloadbalancing:ModifyLoadBalancerAttributes",
+        "elasticloadbalancing:DescribeLoadBalancers",
+        "elasticloadbalancing:DescribeLoadBalancerAttributes",
+        "elasticloadbalancing:CreateTargetGroup",
+        "elasticloadbalancing:DeleteTargetGroup",
+        "elasticloadbalancing:ModifyTargetGroup",
+        "elasticloadbalancing:ModifyTargetGroupAttributes",
+        "elasticloadbalancing:DescribeTargetGroups",
+        "elasticloadbalancing:DescribeTargetGroupAttributes",
+        "elasticloadbalancing:DescribeTargetHealth",
+        "elasticloadbalancing:RegisterTargets",
+        "elasticloadbalancing:DeregisterTargets",
+        "elasticloadbalancing:CreateListener",
+        "elasticloadbalancing:DeleteListener",
+        "elasticloadbalancing:ModifyListener",
+        "elasticloadbalancing:DescribeListeners",
+        "elasticloadbalancing:DescribeListenerAttributes",
+        "elasticloadbalancing:AddTags",
+        "elasticloadbalancing:RemoveTags",
+        "elasticloadbalancing:DescribeTags"
       ],
       "Resource": "*",
       "Condition": {
@@ -153,6 +192,23 @@
       "Resource": "arn:aws:iam::617464676572:role/adc-*",
       "Condition": {
         "StringEquals": { "iam:PassedToService": "ecs-tasks.amazonaws.com" }
+      }
+    },
+    {
+      "Sid": "CreateServiceLinkedRolesForElbAndEcs",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": [
+        "arn:aws:iam::617464676572:role/aws-service-role/elasticloadbalancing.amazonaws.com/AWSServiceRoleForElasticLoadBalancing",
+        "arn:aws:iam::617464676572:role/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:AWSServiceName": [
+            "elasticloadbalancing.amazonaws.com",
+            "ecs.amazonaws.com"
+          ]
+        }
       }
     }
   ]

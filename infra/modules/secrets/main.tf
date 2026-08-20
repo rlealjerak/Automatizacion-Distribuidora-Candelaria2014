@@ -38,3 +38,21 @@ resource "aws_secretsmanager_secret_version" "keepa" {
     ignore_changes = [secret_string]
   }
 }
+
+# Shared key every caller (OpenClaw) must send as X-Api-Key once this
+# backend sits behind a public ALB - see backend/src/adc_backend/
+# modules/auth.py. Same placeholder-then-populate-by-hand pattern as the
+# two secrets above.
+resource "aws_secretsmanager_secret" "api_key" {
+  name        = "${var.project_name}/${var.environment}/api-key"
+  description = "Shared API key for the OpenClaw-facing HTTP API (X-Api-Key header). Populated manually after apply."
+}
+
+resource "aws_secretsmanager_secret_version" "api_key" {
+  secret_id     = aws_secretsmanager_secret.api_key.id
+  secret_string = jsonencode({ placeholder = "replace-me-via-console-or-cli" })
+
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
+}

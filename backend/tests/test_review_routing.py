@@ -88,6 +88,15 @@ def test_gated_pending_strong_deal_gets_specific_reason():
     assert "invoice" in notes.lower()
 
 
+def test_ambiguous_restriction_gets_specific_reason():
+    trace = [{"rule": "ambiguous_restriction_reason", "result": "info", "reasoning": "NOT_ELIGIBLE"}]
+    reason, notes = determine_review_reason(
+        _state(classification=ClassificationLabel.REVIEW, classification_trace=trace)
+    )
+    assert reason == ReviewReason.AMBIGUOUS_RESTRICTION
+    assert "message text" in notes.lower()
+
+
 def test_review_classification_without_gating_falls_back_to_other():
     trace = [{"rule": "sales_velocity", "result": "fail", "reasoning": "weak"}]
     reason, _ = determine_review_reason(

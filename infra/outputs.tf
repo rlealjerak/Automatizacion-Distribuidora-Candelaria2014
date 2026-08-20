@@ -38,3 +38,12 @@ output "ecr_repository_url" {
 output "ecs_cluster_name" {
   value = module.ecs_cluster.cluster_name
 }
+
+output "alb_dns_name" {
+  description = "HTTP-only for now - see modules/alb/main.tf on why. http://<this>/health for a quick check; every other route needs X-Api-Key."
+  value       = module.alb.dns_name
+}
+
+output "api_key_secret_name" {
+  value = module.secrets.api_key_secret_name
+}

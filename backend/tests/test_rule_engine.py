@@ -36,6 +36,7 @@ def _inputs(**overrides) -> ClassificationInputs:
         fba_fee=Decimal(2),
         other_fees_total=Decimal(0),
         is_restricted=False,
+        ambiguous_restriction=False,
         is_gated=False,
         gated_approval_status="not_applicable",
         manufacturer_sells_directly=False,
@@ -68,6 +69,21 @@ class TestHardExcludes:
         # Both true - restricted is evaluated first and short-circuits, so
         # the manufacturer rule should never even appear in the trace.
         decision = classify(_inputs(is_restricted=True, manufacturer_sells_directly=True), CONFIG)
+        assert "manufacturer_sells_directly" not in _trace_rules(decision)
+
+    def test_ambiguous_restriction_is_review_not_a_guess(self):
+        # NOT_ELIGIBLE (see sp_api_client.py) is confirmed live to mean
+        # either a permanent restriction or a clearable brand gate,
+        # depending on category - must not be hard-excluded (could
+        # silently discard an obtainable deal) nor treated as clean
+        # (could violate the hard "never show a restricted product" rule).
+        decision = classify(_inputs(ambiguous_restriction=True), CONFIG)
+        assert decision.classification == ClassificationLabel.REVIEW
+        assert decision.roi_pct is None  # short-circuited before financial math, same as a hard exclude
+        assert _trace_rules(decision)["ambiguous_restriction_reason"] == "info"
+
+    def test_ambiguous_restriction_takes_priority_over_manufacturer_check(self):
+        decision = classify(_inputs(ambiguous_restriction=True, manufacturer_sells_directly=True), CONFIG)
         assert "manufacturer_sells_directly" not in _trace_rules(decision)
 
 

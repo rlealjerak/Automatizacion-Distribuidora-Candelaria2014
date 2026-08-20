@@ -26,6 +26,7 @@ class ReviewReason(str, enum.Enum):
     TIERED_PROMO_PRICING = "tiered_promo_pricing"
     GATED_PENDING_STRONG_DEAL = "gated_pending_strong_deal"
     AMBIGUOUS_PARSE = "ambiguous_parse"
+    AMBIGUOUS_RESTRICTION = "ambiguous_restriction"
     OTHER = "other"
 
 

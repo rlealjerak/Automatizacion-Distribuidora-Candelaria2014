@@ -19,7 +19,7 @@ resource "aws_sqs_queue" "list_processing" {
 
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.list_processing_dlq.arn
-    maxReceiveCount      = var.max_receive_count
+    maxReceiveCount     = var.max_receive_count
   })
 }
 
@@ -27,6 +27,6 @@ resource "aws_sqs_queue_redrive_allow_policy" "list_processing_dlq" {
   queue_url = aws_sqs_queue.list_processing_dlq.id
   redrive_allow_policy = jsonencode({
     redrivePermission = "byQueue"
-    sourceQueueArns    = [aws_sqs_queue.list_processing.arn]
+    sourceQueueArns   = [aws_sqs_queue.list_processing.arn]
   })
 }

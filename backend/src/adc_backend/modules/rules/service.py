@@ -56,6 +56,7 @@ def classify_line_item(db: Session, list_run_id: uuid.UUID, raw_line_item_id: uu
         fba_fee=snapshot.fba_fee,
         other_fees_total=other_fees_total,
         is_restricted=bool(snapshot.is_restricted),
+        ambiguous_restriction=bool(snapshot.ambiguous_restriction),
         is_gated=bool(snapshot.is_gated),
         gated_approval_status=snapshot.gated_approval_status.value,
         manufacturer_sells_directly=bool(snapshot.manufacturer_sells_directly),

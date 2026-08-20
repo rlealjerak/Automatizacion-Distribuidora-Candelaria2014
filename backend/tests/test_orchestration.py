@@ -66,7 +66,9 @@ class _StubSPAPIClient:
         return FeesEstimate(asin=asin, referral_fee=Decimal("3.00"), fba_fee=Decimal("2.00"), other_fees={}, raw_response={})
 
     def get_listing_restrictions(self, asin: str, seller_id: str, marketplace_id: str = ""):
-        return RestrictionsResult(asin=asin, is_restricted=False, is_gated=False, approved_for_seller=True, raw_response={})
+        return RestrictionsResult(
+            asin=asin, is_restricted=False, is_gated=False, ambiguous_restriction=False, approved_for_seller=True, raw_response={}
+        )
 
 
 class _StubKeepaClient:

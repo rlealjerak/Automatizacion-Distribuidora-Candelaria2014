@@ -32,10 +32,10 @@ resource "aws_db_instance" "main" {
 
   manage_master_user_password = true
 
-  db_subnet_group_name  = aws_db_subnet_group.main.name
+  db_subnet_group_name   = aws_db_subnet_group.main.name
   vpc_security_group_ids = [var.rds_security_group_id]
   publicly_accessible    = false
-  multi_az                = false # MVP: single-AZ to control cost. Revisit if downtime risk becomes unacceptable.
+  multi_az               = false # MVP: single-AZ to control cost. Revisit if downtime risk becomes unacceptable.
 
   # 0 (no automated backups), not a real target - this AWS account rejected
   # any nonzero value with "FreeTierRestrictionError: The specified backup

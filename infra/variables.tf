@@ -67,9 +67,9 @@ variable "db_skip_final_snapshot" {
 }
 
 variable "db_backup_retention_period" {
-  description = "Days of automated RDS backups. 0 for now - this AWS account's plan rejected any nonzero value (FreeTierRestrictionError, confirmed via a real apply). Revisit before real data exists - see modules/rds/main.tf."
+  description = "Days of automated RDS backups. Previously 0 because this AWS account's plan rejected any nonzero value (FreeTierRestrictionError, confirmed via a real apply) - retrying at 7 now; revert to 0 if the same error recurs on apply."
   type        = number
-  default     = 0
+  default     = 7
 }
 
 # --- SQS ---
@@ -104,4 +104,16 @@ variable "container_port" {
   description = "Port the backend container listens on."
   type        = number
   default     = 8000
+}
+
+variable "container_image_tag" {
+  description = "ECR image tag to deploy. The repo has immutable tags (see modules/ecr), so 'latest' can never actually be pushed twice - found live on the first real deploy (2026-08-16). Using explicit version tags (v1, v2, ...) for now; a real CI/deploy pipeline would use git-SHA tags instead, flagged not fixed for now."
+  type        = string
+  default     = "v2"
+}
+
+variable "sp_api_seller_id" {
+  description = "This project's own Amazon Selling Partner ID (merchant token) - non-secret, just an account identifier (see backend config.py). Confirmed live 2026-08-15 via a real SP-API fees-estimate response echoing it back."
+  type        = string
+  default     = "AGKTO8HZBBQC4"
 }

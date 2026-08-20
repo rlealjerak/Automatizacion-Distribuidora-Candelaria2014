@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     sp_api_secret_name: str = ""
     keepa_secret_name: str = ""
     db_secret_name: str = ""  # RDS-managed master user secret
+    api_key_secret_name: str = ""  # shared key OpenClaw/callers send as X-Api-Key - see modules/auth.py
 
     # Non-secret: this seller's own Amazon Selling Partner ID, needed for
     # the SP-API listing-restrictions check (it's scoped per-seller, not

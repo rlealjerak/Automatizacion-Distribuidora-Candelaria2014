@@ -169,6 +169,82 @@ owner must be able to see *why*, not just the label.
 
 ---
 
+## Current status (updated 2026-08-20)
+
+**RDS backup retention closed — one of the two long-flagged infra gaps.**
+`backup_retention_period` had been `0` since the original apply
+(2026-08-07) because this AWS account's plan rejected any nonzero value
+outright (`FreeTierRestrictionError`). The user upgraded the account's
+plan; nonzero values are now accepted. Changed the default in
+`infra/variables.tf` (`db_backup_retention_period`) from `0` to `7` and
+confirmed live: `aws rds describe-db-instances` shows
+`BackupRetentionPeriod: 7` on `adc-prod-db`, `terraform plan` reports "No
+changes" against the updated config, and `terraform apply` (a no-op
+against real infra) resynced the local state file, which had gone stale
+— the retention change was applied directly against AWS, not through
+Terraform, so `terraform state show` still read the old `0` until
+refreshed.
+
+**Still open:** `deletion_protection` (`infra/variables.tf` /
+`modules/rds/main.tf`) — same category, still `false`, not addressed by
+this change. Revisit before this holds real supplier/pricing data no one
+has a recovery path for otherwise.
+
+---
+
+## Current status (updated 2026-08-16)
+
+**This system is deployed and reachable for the first time ever.**
+`http://<alb_dns_name>/health` returns 200 from a real, running ECS
+Fargate task behind a real ALB — the one piece of `infra/` flagged as
+undone since the original apply is now built: `modules/alb` (new) +
+`modules/ecs_cluster`'s task definition/service (previously deferred).
+Full narrative of what it took: six real IAM permission rounds (ELB
+actions, two service-linked-role grants — one needed an explicit
+`aws iam create-service-linked-role`, ECS's own auto-create didn't
+reliably trigger — plus a few narrowly-scoped EC2/ECS gaps), all fixed
+in `infra/claude-code-iam-policy.json`; two real bugs from actually
+building and deploying the container for the first time (wrong CPU
+architecture - built on this arm64 Mac without `--platform linux/amd64`,
+Fargate couldn't pull it; and an alembic `configparser` interpolation
+crash on the real RDS password's percent-encoded characters, never
+caught locally since the dev password has none of those). Both fixed,
+both verified against the real deployment.
+
+**Before any of that, a security gap had to close first:** the API had
+*zero authentication* anywhere. Added a shared `X-Api-Key` header,
+enforced on every route except `/health` (`backend/src/adc_backend/
+modules/auth.py`), backed by a new `adc/prod/api-key` secret. Verified
+live: 401 without the header, 200 with the real key.
+
+**Also verified live, closing a gap flagged earlier the same day:**
+`seed_default_rules_config()` had never run against real RDS — it now
+runs automatically on every container start (`entrypoint.sh`, alongside
+`alembic upgrade head`, both idempotent), confirmed via real CloudWatch
+logs on the first real deploy: migrations ran, config seeded, classify
+is no longer a silent no-op in production.
+
+**Known, deliberately-flagged-not-fixed gap: no TLS.** The ALB is
+HTTP-only — no domain name or ACM certificate exists yet, so `X-Api-Key`
+currently travels in plaintext over the internet. Same category as the
+already-flagged RDS `backup_retention_period`/`deletion_protection`
+gaps — needs a real decision (domain + cert) before this carries
+anything beyond dev/test traffic, not something to silently accept
+long-term.
+
+**Also flagged, not blocking:** ECR has immutable tags (found live — a
+`:latest` re-push failed); `container_image_tag` now defaults to an
+explicit version (`v2`) bumped by hand each deploy. A real CI/deploy
+pipeline should use git-SHA tags instead.
+
+**Next:** decide on a domain + ACM cert for HTTPS before any real
+traffic; give OpenClaw the ALB DNS name + the real API key (out of band,
+never in a transcript) so it can actually call this backend; work out a
+deploy story better than "build/push/bump-a-tf-var by hand" (this
+session's process, fine for a first deploy, not for ongoing iteration).
+
+---
+
 ## Current status (updated 2026-08-15)
 
 **Dev machine changed: this project is now worked on from a Mac**
@@ -229,13 +305,58 @@ flowing through as a literal very-low-velocity number instead of `None`
 (`_none_if_negative`); 112/112 tests still pass. Module docstring updated
 to reflect live-verified status.
 
-**Next:** SP-API's `get_pricing`, `get_fees_estimate`, and
-`get_listing_restrictions` are the one piece of steps 5-6 still
-unverified against live data (only `search_catalog_items` and now all of
-Keepa are) — see `sp_api_client.py` docstring. After that, a real
-end-to-end pipeline run against a real supplier list is the actual
-verification of steps 7-8's matching/rule engine against live numbers,
-not just mocks.
+**Update same day: SP-API fully live-verified, real bugs fixed, and a
+full real end-to-end pipeline run completed successfully.**
+
+`get_pricing`/`get_fees_estimate`/`get_listing_restrictions` all called
+live for the first time, against real ASINs. Two real, load-bearing bugs
+found and fixed (both now covered by regression tests, 116/116 passing):
+1. `get_fees_estimate` never sent `IsAmazonFulfilled=True` — SP-API
+   silently estimated merchant-fulfilled fees instead of FBA fees, so
+   `fba_fee` came back `None` on every real ASIN despite this being an
+   FBA-only business.
+2. `get_listing_restrictions` didn't scope to a condition type and didn't
+   recognize the reason code SP-API actually returns (`NOT_ELIGIBLE`) —
+   a genuinely restricted real ASIN came back as neither restricted nor
+   gated. Fixed by scoping to `conditionType=new_new`.
+
+A third finding wasn't a bug to silently fix — `NOT_ELIGIBLE` turned out
+to mean two different real things (permanent restriction vs. a clearable
+brand-authorization gate) under the *identical* reason code on the same
+ASIN. Per explicit user decision after seeing the live evidence, this now
+routes to manual review (new `ambiguous_restriction` flag threaded
+through `RestrictionsResult` → `AmazonDataSnapshot` → rule engine → review
+queue, migration `e64eb0eeb98c`) rather than guessing either direction.
+
+**Full real end-to-end pipeline run**, driven through the actual
+OpenClaw-facing HTTP API (not internal function calls) against real
+Postgres, real S3, real SP-API, and real Keepa — a synthetic-but-real
+5-row supplier list covering every special case CLAUDE.md calls out:
+a standard item with an ambiguous restriction (correctly landed in the
+review queue, full live reasoning trace confirmed in the DB), a standard
+item with clean live financials (correctly classified `NO_BUY` on real
+negative ROI), a display/bundle SKU, a tiered-promo-pricing block, and a
+row with no supplier item number. All five landed exactly where CLAUDE.md
+says they should. Column mapping, ASIN matching, live pricing/fees/
+restrictions/velocity, rule engine, and review-queue routing all worked
+together for real, for the first time.
+
+**One real deployment gap found and worth acting on before any real
+supplier list is run against production:** `seed_default_rules_config()`
+(`rules/config.py`) has never been run against real RDS — only ever
+against local dev Postgres in earlier test sessions. Without it,
+classification silently no-ops on every row (found live during this run;
+harmless in that it fails safe into "needs review," but it means zero
+`Buy`/`No-buy`/etc. output until someone runs this once). Test file used
+for the live run was cleaned up from the real `adc-prod-supplier-files`
+S3 bucket afterward (soft-deleted — versioning is on, per infra).
+
+**Next:** run `seed_default_rules_config()` against real RDS before the
+first real supplier list. After that, nothing in the MVP pipeline is
+still unverified against live data — the remaining build-order item is
+the ECS task definition/service (never built) to actually deploy this,
+plus the RDS `backup_retention_period`/`deletion_protection` flags still
+open from the infra-apply findings.
 
 ---
 

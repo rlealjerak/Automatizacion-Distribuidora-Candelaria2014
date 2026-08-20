@@ -20,6 +20,10 @@ caller building an owner-facing list should treat a NO_BUY whose top
 trace entry is a hard exclude as "never show as an option" per CLAUDE.md,
 distinct from an ordinary NO_BUY on the financials alone):
   - restricted                                  -> NO_BUY (hard exclude)
+  - ambiguous restriction reason (SP-API NOT_ELIGIBLE - confirmed live to
+    mean either a permanent restriction or a clearable brand gate,
+    depending on category, under the identical code) -> REVIEW, never
+    guessed either way (added 2026-08-15, user decision after live evidence)
   - manufacturer sells directly                 -> NO_BUY (hard exclude)
   - gated, not approved, deal not notably strong -> NO_BUY (not discarded from
     the DB, just not worth surfacing as-is - CLAUDE.md: "don't discard")
@@ -49,6 +53,7 @@ class ClassificationInputs:
     fba_fee: Decimal | None
     other_fees_total: Decimal
     is_restricted: bool
+    ambiguous_restriction: bool  # see sp_api_client.py RestrictionsResult - NOT_ELIGIBLE, not a clean hard-exclude
     is_gated: bool
     gated_approval_status: str  # "not_applicable" | "approved" | "pending_approval" | "not_approved"
     manufacturer_sells_directly: bool
@@ -108,6 +113,22 @@ def classify(inputs: ClassificationInputs, config: dict) -> ClassificationDecisi
             )
         )
         return ClassificationDecision(ClassificationLabel.NO_BUY, None, None, [e.to_dict() for e in trace])
+
+    if inputs.ambiguous_restriction:
+        trace.append(
+            RuleTraceEntry(
+                rule="ambiguous_restriction_reason",
+                result="info",
+                reasoning=(
+                    "SP-API returned an ambiguous restriction reason (NOT_ELIGIBLE) - this code has been "
+                    "confirmed to mean either a permanent restriction or a clearable brand-authorization gate "
+                    "depending on category, with no reliable way to tell which from the reason code alone. "
+                    "Routed to manual review rather than guessed - see the raw restrictions response for the "
+                    "actual message text."
+                ),
+            )
+        )
+        return ClassificationDecision(ClassificationLabel.REVIEW, None, None, [e.to_dict() for e in trace])
 
     if inputs.manufacturer_sells_directly:
         trace.append(
