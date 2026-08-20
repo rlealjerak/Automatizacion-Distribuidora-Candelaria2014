@@ -169,6 +169,29 @@ owner must be able to see *why*, not just the label.
 
 ---
 
+## Current status (updated 2026-08-20)
+
+**RDS backup retention closed — one of the two long-flagged infra gaps.**
+`backup_retention_period` had been `0` since the original apply
+(2026-08-07) because this AWS account's plan rejected any nonzero value
+outright (`FreeTierRestrictionError`). The user upgraded the account's
+plan; nonzero values are now accepted. Changed the default in
+`infra/variables.tf` (`db_backup_retention_period`) from `0` to `7` and
+confirmed live: `aws rds describe-db-instances` shows
+`BackupRetentionPeriod: 7` on `adc-prod-db`, `terraform plan` reports "No
+changes" against the updated config, and `terraform apply` (a no-op
+against real infra) resynced the local state file, which had gone stale
+— the retention change was applied directly against AWS, not through
+Terraform, so `terraform state show` still read the old `0` until
+refreshed.
+
+**Still open:** `deletion_protection` (`infra/variables.tf` /
+`modules/rds/main.tf`) — same category, still `false`, not addressed by
+this change. Revisit before this holds real supplier/pricing data no one
+has a recovery path for otherwise.
+
+---
+
 ## Current status (updated 2026-08-16)
 
 **This system is deployed and reachable for the first time ever.**

@@ -67,9 +67,9 @@ variable "db_skip_final_snapshot" {
 }
 
 variable "db_backup_retention_period" {
-  description = "Days of automated RDS backups. 0 for now - this AWS account's plan rejected any nonzero value (FreeTierRestrictionError, confirmed via a real apply). Revisit before real data exists - see modules/rds/main.tf."
+  description = "Days of automated RDS backups. Previously 0 because this AWS account's plan rejected any nonzero value (FreeTierRestrictionError, confirmed via a real apply) - retrying at 7 now; revert to 0 if the same error recurs on apply."
   type        = number
-  default     = 0
+  default     = 7
 }
 
 # --- SQS ---
