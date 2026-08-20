@@ -1,10 +1,20 @@
 """
 Keepa API client - sales rank history/trend and price history.
 
-*** UNVERIFIED AGAINST LIVE KEEPA. *** Same caveat as sp_api_client.py:
-built to Keepa's documented REST contract, but only a placeholder API key
-exists in Secrets Manager so far. Tests here are against mocked responses
-shaped like Keepa's documented schema.
+*** LIVE-VERIFIED AGAINST REAL KEEPA (as of 2026-08-15). *** A real API
+key is now in Secrets Manager; get_product() has been called against
+several real ASINs and returned real titles/prices/sales ranks (e.g.
+"0439023483" -> "The Hunger Games", rank 2577, price $11.94,
+salesRankDrops30=46). Unit tests here still run against mocked responses
+shaped like Keepa's documented schema, for speed/determinism - the live
+call was the one-time verification that the contract assumed there
+matches reality.
+
+That live check is also what caught a real bug: Keepa's -1 "no data"
+sentinel was normalized for the current/avg30/avg90 array fields but not
+for the scalar salesRankDrops30/90 fields, so an untracked ASIN's -1 was
+flowing through as a literal (very-low-velocity) number instead of None
+(no data - needs manual review). Fixed below (_none_if_negative).
 
 Honest scope note: Keepa does not report "estimated units sold per
 month" as a direct field - that figure is something third-party tools
@@ -85,8 +95,8 @@ class KeepaClient:
             asin=asin,
             current_sales_rank=_none_if_missing(stats.get("current", [None] * 4), 3),
             avg_sales_rank_30d=_none_if_missing(stats.get("avg30", [None] * 4), 3),
-            sales_rank_drops_30d=stats.get("salesRankDrops30"),
-            sales_rank_drops_90d=stats.get("salesRankDrops90"),
+            sales_rank_drops_30d=_none_if_negative(stats.get("salesRankDrops30")),
+            sales_rank_drops_90d=_none_if_negative(stats.get("salesRankDrops90")),
             current_price=_cents_to_decimal(_none_if_missing(stats.get("current", [None]), 0)),
             avg_price_90d=_cents_to_decimal(_none_if_missing(stats.get("avg90", [None]), 0)),
             out_of_stock_percentage_90d=(product.get("outOfStockPercentage90") or {}).get("Amazon"),
@@ -98,7 +108,11 @@ def _none_if_missing(values: list, index: int) -> int | None:
     """Keepa uses -1 as its own 'no data' sentinel throughout the CSV/stats arrays."""
     if index >= len(values):
         return None
-    value = values[index]
+    return _none_if_negative(values[index])
+
+
+def _none_if_negative(value: int | None) -> int | None:
+    """Same -1 'no data' sentinel, for scalar (non-array) stats fields like salesRankDrops30/90."""
     if value is None or value == -1:
         return None
     return value

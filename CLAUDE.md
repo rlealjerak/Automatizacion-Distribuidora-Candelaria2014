@@ -169,6 +169,76 @@ owner must be able to see *why*, not just the label.
 
 ---
 
+## Current status (updated 2026-08-15)
+
+**Dev machine changed: this project is now worked on from a Mac**
+(previously Windows — see the AWS-CLI-install saga in the 2026-08-04
+status block below, which no longer applies). A fresh clone onto this
+machine needed re-doing all local environment setup from scratch;
+verified working now:
+- **AWS CLI is authenticated correctly** as IAM user `claude-code` in
+  account `617464676572` (the account `infra/backend.tf`'s state bucket
+  and all applied resources actually live in) — a fresh `aws configure`
+  on this machine initially pointed at a *different*, unrelated AWS
+  account (`570634575880`); caught before anything ran against it, then
+  the user reconfigured credentials for the right account.
+- **Terraform installed** at `~/.local/bin/terraform` (v1.15.8 — `brew
+  install terraform` failed here on outdated Command Line Tools, so
+  installed from the official release zip instead; `~/.zshrc` already
+  puts `~/.local/bin` on `PATH`). `terraform init` + `terraform plan`
+  against the real `617464676572` state: **"No changes."** — confirms
+  the infra apply from 2026-08-07 is still intact and unchanged.
+- **Backend Python venv rebuilt** (`backend/.venv`, same dependency list
+  as before). Local Postgres via `docker compose up -d` (port 5433),
+  `alembic upgrade head` clean, **all 112 pytest tests pass** — but only
+  once `DATABASE_URL` and `S3_BUCKET_NAME` are `export`ed in the shell,
+  not just present in `backend/.env`; pytest fixtures read the process
+  environment directly, `.env` is only loaded by the app at runtime via
+  `pydantic-settings`. This was silently skipping 30 of 112 tests before
+  that was caught — README's local-dev section fixed to call this out,
+  plus its `.venv/Scripts/...` (Windows-only) paths corrected to
+  `.venv/bin/...` for Mac/Linux, with a Windows note kept alongside.
+- **Secrets Manager checked (metadata only, not values):**
+  `adc/prod/sp-api-credentials` was last changed 2026-08-10 — matches
+  the real-LWA-credentials commit (`6951cb6`) and confirms that update
+  actually landed in the real account. **`adc/prod/keepa-api-key` has
+  never been changed since its Terraform-placeholder creation on
+  2026-08-06** — Keepa is still fully unverified against live data, and
+  putting a real key there is the next concrete blocking step (see
+  `infra/README.md` for the `put-secret-value` command).
+- **RDS** (`adc-prod-db`): available, `backup_retention_period = 0`,
+  `deletion_protection = false` — both still exactly as flagged in
+  `docs/decisions/0003-infra-apply-findings.md`; unchanged, still open.
+- **New IAM gap found:** the `claude-code` user can't call
+  `ecs:ListTaskDefinitions` / `ecs:ListClusters` — irrelevant today since
+  no ECS task definition exists yet (still the one undone piece of
+  `infra/`), but will need a policy update once that's built.
+- 16 pre-existing `ruff` lint findings in `backend/` — not introduced by
+  this session, not fixed, just noted.
+
+**Update same day: real Keepa API key added and live-verified.** A real
+key is now in `adc/prod/keepa-api-key` (changed 2026-08-15). A one-off
+smoke script (not part of the test suite) called `KeepaClient.get_product()`
+against several real ASINs and got real data back (e.g. `0439023483` →
+"The Hunger Games", rank 2577, price $11.94, `salesRankDrops30=46`).
+That live check caught a real bug, now fixed: Keepa's `-1` "no data"
+sentinel was normalized for the array-based stats fields but not for the
+scalar `salesRankDrops30`/`90` fields, so an untracked ASIN's `-1` was
+flowing through as a literal very-low-velocity number instead of `None`
+(no data → should route to manual review). Fixed in `keepa_client.py`
+(`_none_if_negative`); 112/112 tests still pass. Module docstring updated
+to reflect live-verified status.
+
+**Next:** SP-API's `get_pricing`, `get_fees_estimate`, and
+`get_listing_restrictions` are the one piece of steps 5-6 still
+unverified against live data (only `search_catalog_items` and now all of
+Keepa are) — see `sp_api_client.py` docstring. After that, a real
+end-to-end pipeline run against a real supplier list is the actual
+verification of steps 7-8's matching/rule engine against live numbers,
+not just mocks.
+
+---
+
 ## Current status (updated 2026-08-07)
 
 **Steps 3-12 (the entire remaining MVP pipeline) are built, at the user's

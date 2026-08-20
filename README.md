@@ -97,12 +97,23 @@ services, 30 run against real local Postgres and/or the real
 ```bash
 cd backend
 python -m venv .venv
-./.venv/Scripts/pip install fastapi "uvicorn[standard]" pydantic-settings boto3 sqlalchemy alembic psycopg2-binary pdfplumber openpyxl rapidfuzz python-multipart pytest httpx reportlab ruff
+./.venv/bin/pip install fastapi "uvicorn[standard]" pydantic-settings boto3 sqlalchemy alembic psycopg2-binary pdfplumber openpyxl rapidfuzz python-multipart pytest httpx reportlab ruff
 cp .env.example .env   # DATABASE_URL in here points at the docker-compose Postgres below
 docker compose up -d   # local Postgres on port 5433 (5432 is often taken by other projects)
-./.venv/Scripts/python -m alembic upgrade head
-./.venv/Scripts/pytest -v
+export DATABASE_URL="postgresql+psycopg2://adc_admin:localdev_only_not_a_secret@localhost:5433/adc"
+export S3_BUCKET_NAME="adc-prod-supplier-files"  # only needed for the S3-backed ingestion tests; requires real AWS creds for the project account
+./.venv/bin/python -m alembic upgrade head
+./.venv/bin/pytest -v
 ```
+
+(On Windows, use `.venv\Scripts\pip`, `.venv\Scripts\python`, and
+`.venv\Scripts\pytest` instead of the `.venv/bin/...` paths above.)
+
+Note: `.env` is read by the app at runtime via `pydantic-settings`, but
+pytest's fixtures read `DATABASE_URL`/`S3_BUCKET_NAME` directly from the
+process environment — `cp .env.example .env` alone isn't enough to make
+the DB-/S3-backed tests run; export them in the shell too, or they'll
+skip silently instead of failing.
 
 (A `pyproject.toml` for Poetry is in place too, for once Poetry is
 installed locally / in CI — the venv+pip steps above are just what was
