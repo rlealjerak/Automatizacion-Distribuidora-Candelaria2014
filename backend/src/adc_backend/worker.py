@@ -12,10 +12,11 @@ active rules config) is left on the queue rather than deleted, so SQS's
 own redrive policy (maxReceiveCount, then the DLQ - see infra/modules/sqs)
 handles retry/eventual quarantine instead of this process reinventing it.
 
-Not yet deployed - no ECS task definition/service exists for this yet
-(see infra/modules/ecs_cluster's docstring). Runnable locally against the
-real SQS queue right now, though (`adc-prod-list-processing`, live per
-docs/decisions/0003-infra-apply-findings.md), for manual testing.
+Deployed as its own ECS Fargate service (`adc-prod-worker`, no load
+balancer attachment - it doesn't receive inbound traffic), sharing the
+API's image with `command` overridden at the task-definition level to
+run this module instead of `entrypoint.sh` (see infra/modules/ecs_cluster).
+Runnable locally against the real SQS queue too, for manual testing.
 """
 
 from __future__ import annotations
@@ -24,15 +25,18 @@ import json
 import logging
 import uuid
 
-import boto3
-
-from adc_backend.config import get_settings
+from adc_backend.config import get_settings, get_sqs_client
 from adc_backend.db.base import get_sessionmaker
 from adc_backend.modules.amazon.keepa_client import KeepaClient
 from adc_backend.modules.amazon.sp_api_client import SPAPIClient
 from adc_backend.modules.tools.orchestration import OrchestrationError, process_run
 
 logging.basicConfig(level=logging.INFO)
+# See main.py's identical line for why: httpx logs the full request URL at
+# INFO, and Keepa's API key travels as a URL query param - left unsuppressed
+# this writes the real secret into CloudWatch logs on every Keepa call. This
+# is the process that actually caught it live (2026-08-20).
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -41,7 +45,7 @@ def main() -> None:
     if not settings.sqs_queue_url:
         raise RuntimeError("SQS_QUEUE_URL is not set - can't start the worker")
 
-    sqs = boto3.client("sqs", region_name=settings.aws_region)
+    sqs = get_sqs_client()
     logger.info("adc-backend worker starting | queue=%s", settings.sqs_queue_url)
 
     while True:

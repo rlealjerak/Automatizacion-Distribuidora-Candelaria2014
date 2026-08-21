@@ -67,6 +67,12 @@ def _secrets_client():
     return boto3.client("secretsmanager", region_name=get_settings().aws_region)
 
 
+@lru_cache
+def get_sqs_client():
+    """Shared boto3 SQS client - used to enqueue runs (router.py) and to long-poll them (worker.py)."""
+    return boto3.client("sqs", region_name=get_settings().aws_region)
+
+
 def get_secret(secret_name: str) -> dict:
     """
     Fetch and parse a JSON secret from Secrets Manager by name or ARN.

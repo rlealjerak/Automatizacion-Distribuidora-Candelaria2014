@@ -15,6 +15,7 @@ to this router).
 
 from __future__ import annotations
 
+import json
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
@@ -22,10 +23,9 @@ from fastapi.responses import Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from adc_backend.config import get_settings, get_sqs_client
 from adc_backend.db.base import get_db
 from adc_backend.db.core_models import ListRun, Supplier
-from adc_backend.modules.amazon.keepa_client import KeepaClient
-from adc_backend.modules.amazon.sp_api_client import SPAPIClient
 from adc_backend.modules.ingestion.models import RawLineItem
 from adc_backend.modules.ingestion.service import IngestionError, ingest_file
 from adc_backend.modules.matching.engine import confirm_match, reject_match
@@ -44,7 +44,6 @@ from adc_backend.modules.review.service import (
 )
 from adc_backend.modules.rules.models import ClassificationResult
 from adc_backend.modules.tools.export import compare_runs, export_run_results_csv
-from adc_backend.modules.tools.orchestration import OrchestrationError, process_run
 from adc_backend.modules.tools.schemas import (
     ConfirmMappingRequest,
     ConfirmMatchRequest,
@@ -52,7 +51,7 @@ from adc_backend.modules.tools.schemas import (
     LineItemResultOut,
     ListRunOut,
     MatchOut,
-    ProcessRunResponse,
+    ProcessRunQueuedResponse,
     ProposedFieldMapping,
     ProposedMappingOut,
     RejectMatchRequest,
@@ -149,24 +148,33 @@ def confirm_run_mapping(run_id: uuid.UUID, body: ConfirmMappingRequest, db: Sess
 # --- processing (steps 5-9 combined: matching, live data, classification, review routing) ---
 
 
-@router.post("/runs/{run_id}/process", response_model=ProcessRunResponse)
+@router.post("/runs/{run_id}/process", response_model=ProcessRunQueuedResponse, status_code=202)
 def process_run_endpoint(run_id: uuid.UUID, db: Session = Depends(get_db)):
     """
-    Synchronous trigger for now - the SQS worker (worker.py) calls the
-    same `process_run` function for real background processing once
-    deployed (CLAUDE.md: list processing must run as a background job,
-    not inline in a request). Exposed directly here too since nothing
-    is deployed to ECS yet and this is how the pipeline gets exercised
-    for real during development.
+    Enqueues the run to SQS (`adc-prod-list-processing`) for the worker
+    (worker.py, deployed as its own ECS service) to actually process -
+    CLAUDE.md requires list processing to run as a background job, not
+    inline in a request: a real 5,000+ row list risks an ALB timeout on
+    the synchronous path, and a mid-request crash would lose all
+    progress with no retry. Fails fast here, before enqueueing, if the
+    run doesn't exist or has no confirmed mapping yet, so the caller
+    gets an immediate 400 instead of a message that would just dead-letter.
+
+    Was a synchronous trigger before the worker had anywhere to run
+    (see git history) - now that it's deployed, this always enqueues.
     """
-    try:
-        summary = process_run(db, run_id, SPAPIClient(), KeepaClient())
-    except OrchestrationError as e:
-        db.rollback()
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    db.commit()
     run = db.get(ListRun, run_id)
-    return ProcessRunResponse(run_id=run_id, status=run.status.value, **summary)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.confirmed_column_mapping is None:
+        raise HTTPException(status_code=400, detail=f"list_run {run_id} has no confirmed column mapping - can't process")
+
+    settings = get_settings()
+    get_sqs_client().send_message(
+        QueueUrl=settings.sqs_queue_url,
+        MessageBody=json.dumps({"run_id": str(run_id)}),
+    )
+    return ProcessRunQueuedResponse(run_id=run_id, status=run.status.value)
 
 
 # --- results (owner review surface) ---

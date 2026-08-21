@@ -19,6 +19,14 @@ from adc_backend.modules.auth import require_api_key_dependency
 from adc_backend.modules.tools.router import router as tools_router
 
 logging.basicConfig(level=logging.INFO)
+# httpx logs the full request line (method + URL) at INFO by default. Keepa's
+# API takes its API key as a URL query param (?key=...), so left at INFO this
+# writes the real secret value straight into CloudWatch logs on every Keepa
+# call - found live 2026-08-20 via worker.py's logs after the SQS worker
+# actually ran a real Keepa call for the first time somewhere logs were
+# checked closely. Suppressing httpx's own logger to WARNING stops the
+# request-line log without losing this app's own logging.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 

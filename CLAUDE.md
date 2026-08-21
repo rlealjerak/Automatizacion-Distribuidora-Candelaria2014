@@ -169,6 +169,79 @@ owner must be able to see *why*, not just the label.
 
 ---
 
+## Current status (updated 2026-08-20, evening — Goal 1 of `NEXT_PHASE_PLAN.md`)
+
+**Goal 1 (SQS worker as an independent ECS service) is done and fully
+live-verified — both of `NEXT_PHASE_PLAN.md`'s two goals were sequential
+by design (Goal 2/TLS blocked on external domain registration), so only
+Goal 1 was in scope this session.**
+
+`worker.py` is now deployed as its own ECS Fargate service
+(`adc-prod-worker`, no load balancer — it takes no inbound traffic),
+sharing the API's image with `command` overridden at the task-definition
+level to skip `entrypoint.sh` and run the worker's long-poll loop
+directly (`infra/modules/ecs_cluster/main.tf`). `POST
+/runs/{run_id}/process` no longer runs the pipeline inline — it now
+validates the run (404/400 fast-fail before touching SQS) and enqueues
+`{"run_id"}` to `adc-prod-list-processing`, returning `202` immediately
+(`modules/tools/router.py`). Built and pushed as image `v3`, then `v4`
+(see next finding) — `terraform apply` created the worker service and
+rolled the API onto the new image; both confirmed steady, `terraform
+plan` reports **no changes**.
+
+**Live-verified end-to-end, for real, against production:** uploaded a
+synthetic 1-row list through the real API, confirmed mapping, called
+`/process` (**202 in ~0.16s**, not a multi-second synchronous SP-API/Keepa
+round trip), watched the worker's real CloudWatch logs make real SP-API
+calls (catalog search, pricing, fees, restrictions) and a real Keepa
+call, land a real ASIN match, and classify `no_buy` on real negative ROI
+— run status flipped to `completed` within seconds. Separately verified
+the failure path for real: temporarily dropped the queue's
+`VisibilityTimeout` to 10s (restored to 1800s immediately after — no
+Terraform drift), sent a message with a nonexistent `run_id`, and
+confirmed via `ApproximateReceiveCount: 4` on the DLQ message that SQS's
+native redrive (`maxReceiveCount=3`) moved it to
+`adc-prod-list-processing-dlq` on its own — nothing worker.py needed to
+implement itself, exactly per its own design intent.
+
+**Real bug found and fixed along the way, not hypothetical:** `httpx`
+(used by both `sp_api_client.py` and `keepa_client.py`) logs the full
+request URL at `INFO` by default, and Keepa's API takes its key as a URL
+query param (`?key=...`) rather than a header. Neither `main.py` nor
+`worker.py` suppressed httpx's logger, so **the real Keepa API key has
+been written into CloudWatch logs in plaintext on every live Keepa call
+since 2026-08-15** — this session is just the first time anyone read
+those logs closely enough to notice. Fixed in both files
+(`logging.getLogger("httpx").setLevel(logging.WARNING)`), 122/122 tests
+still pass, confirmed live post-fix (`v4`): the same live Keepa call now
+produces zero request-line log output. **The exposed key itself has not
+been rotated** — the user made an explicit, informed call to leave
+rotation for their own schedule rather than do it in this session, aware
+that the old value is sitting in both CloudWatch (30-day retention) and
+this session's transcript. Worth revisiting before this matters more
+(real supplier data, higher Keepa call volume).
+
+**New, smaller IAM gap found, not fixed:** `claude-code` can
+`logs:DescribeLogStreams`/`GetLogEvents` but not `logs:FilterLogEvents`
+or `logs:DeleteLogStream` — blocked a first cleanup attempt on the
+leaked-key log stream (worked around by using `DescribeLogStreams` +
+`GetLogEvents` directly instead, and by favoring key rotation over log
+scrubbing as the actual fix). Same category as the earlier six IAM
+rounds in `infra/claude-code-iam-policy.json`, just not urgent enough to
+fix unprompted this session.
+
+**Leftover in prod, harmless but worth knowing about:** a supplier row
+named "Goal1 Async Verification Supplier" (`code: goal1-async-verify`)
+and two synthetic 1-row test runs against it, created during live
+verification. No delete endpoint exists yet for either; left in place
+rather than reached into RDS directly outside the app's own write paths.
+
+**Goal 2 (TLS/HTTPS) untouched this session** — still correctly blocked
+on domain registration clearing in Route53, per the plan's own
+sequencing. Check that before starting it.
+
+---
+
 ## Current status (updated 2026-08-20)
 
 **RDS backup retention closed — one of the two long-flagged infra gaps.**
