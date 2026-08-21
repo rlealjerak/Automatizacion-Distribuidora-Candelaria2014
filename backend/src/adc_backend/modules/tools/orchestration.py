@@ -1,8 +1,8 @@
 """
 Full per-run pipeline: normalize -> match -> pull live Amazon data ->
-classify -> route to review. This is what a background worker (or the
-direct-trigger endpoint below, useful before an SQS worker is deployed)
-actually runs for one list_run.
+classify -> route to review. This is what the SQS worker (worker.py, its
+own ECS service) runs for one list_run, dequeued from the
+list-processing queue that POST /runs/{run_id}/process enqueues to.
 
 Per-row error isolation is an explicit MVP acceptance criterion
 (CLAUDE.md: "one bad row must not fail the whole run") - every row is

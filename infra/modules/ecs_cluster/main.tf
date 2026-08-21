@@ -99,6 +99,29 @@ resource "aws_iam_role_policy" "ecs_task_app_permissions" {
 # never injected by ECS. That's why there's no `secrets` block in the
 # container definition even though the task role can read them - the app
 # needs the secret *names* as plain env vars, not the values.
+#
+# Shared with the worker task definition below it - same image, same
+# config surface (the worker uses the same Settings class), just a
+# different container `command`. Keeping one env-var list means the two
+# task definitions can't drift out of sync.
+
+locals {
+  backend_environment = [
+    { name = "ENVIRONMENT", value = var.environment },
+    { name = "AWS_REGION", value = var.aws_region },
+    { name = "S3_BUCKET_NAME", value = var.s3_bucket_name },
+    { name = "SQS_QUEUE_URL", value = var.sqs_queue_url },
+    { name = "SP_API_SECRET_NAME", value = var.sp_api_secret_name },
+    { name = "KEEPA_SECRET_NAME", value = var.keepa_secret_name },
+    { name = "DB_SECRET_NAME", value = var.db_secret_name },
+    { name = "API_KEY_SECRET_NAME", value = var.api_key_secret_name },
+    { name = "SP_API_SELLER_ID", value = var.sp_api_seller_id },
+    { name = "DB_HOST", value = var.db_host },
+    { name = "DB_PORT", value = tostring(var.db_port) },
+    { name = "DB_NAME", value = var.db_name },
+    { name = "DB_USERNAME", value = var.db_username },
+  ]
+}
 
 resource "aws_ecs_task_definition" "backend" {
   family                   = "${var.project_name}-${var.environment}-backend"
@@ -117,21 +140,7 @@ resource "aws_ecs_task_definition" "backend" {
       portMappings = [
         { containerPort = var.container_port, protocol = "tcp" }
       ]
-      environment = [
-        { name = "ENVIRONMENT", value = var.environment },
-        { name = "AWS_REGION", value = var.aws_region },
-        { name = "S3_BUCKET_NAME", value = var.s3_bucket_name },
-        { name = "SQS_QUEUE_URL", value = var.sqs_queue_url },
-        { name = "SP_API_SECRET_NAME", value = var.sp_api_secret_name },
-        { name = "KEEPA_SECRET_NAME", value = var.keepa_secret_name },
-        { name = "DB_SECRET_NAME", value = var.db_secret_name },
-        { name = "API_KEY_SECRET_NAME", value = var.api_key_secret_name },
-        { name = "SP_API_SELLER_ID", value = var.sp_api_seller_id },
-        { name = "DB_HOST", value = var.db_host },
-        { name = "DB_PORT", value = tostring(var.db_port) },
-        { name = "DB_NAME", value = var.db_name },
-        { name = "DB_USERNAME", value = var.db_username },
-      ]
+      environment = local.backend_environment
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -171,6 +180,71 @@ resource "aws_ecs_service" "backend" {
   # before the app starts listening - give the health check enough grace
   # period to not flap a task that's still migrating a fresh/behind DB.
   health_check_grace_period_seconds = 60
+
+  depends_on = [aws_iam_role_policy_attachment.ecs_task_execution_managed]
+}
+
+# --- Task definition + service: the SQS worker (background list processing) ---
+#
+# Added once the async processing path existed to enqueue to
+# (POST /runs/{run_id}/process now pushes to SQS instead of calling
+# process_run inline - see modules/tools/router.py). Shares the API's
+# image (same task role already grants sqs:ReceiveMessage/DeleteMessage/
+# SendMessage/GetQueueAttributes on this queue - see ecs_task_app_permissions
+# above, provisioned in anticipation of this) but overrides `command` to
+# skip entrypoint.sh (migrations/seed - the API service already runs
+# those on every start) and run worker.py's long-poll loop directly.
+# No load balancer attachment - this service takes no inbound traffic.
+
+resource "aws_cloudwatch_log_group" "worker" {
+  name              = "/ecs/${var.project_name}-${var.environment}-worker"
+  retention_in_days = 30
+}
+
+resource "aws_ecs_task_definition" "worker" {
+  family                   = "${var.project_name}-${var.environment}-worker"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = var.task_cpu
+  memory                   = var.task_memory
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([
+    {
+      name        = "worker"
+      image       = var.container_image
+      essential   = true
+      command     = ["python", "-m", "adc_backend.worker"]
+      environment = local.backend_environment
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.worker.name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "worker"
+        }
+      }
+    }
+  ])
+
+  tags = {
+    Name = "${var.project_name}-${var.environment}-worker-task"
+  }
+}
+
+resource "aws_ecs_service" "worker" {
+  name            = "${var.project_name}-${var.environment}-worker"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.worker.arn
+  desired_count   = 1 # not autoscaled yet - future optimization once real load is observed
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets          = var.public_subnet_ids
+    security_groups  = [var.ecs_security_group_id]
+    assign_public_ip = true # no NAT gateway - see modules/network/main.tf
+  }
 
   depends_on = [aws_iam_role_policy_attachment.ecs_task_execution_managed]
 }

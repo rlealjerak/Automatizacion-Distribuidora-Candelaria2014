@@ -87,12 +87,16 @@ class ConfirmMappingRequest(BaseModel):
     confirmed_by: str
 
 
-class ProcessRunResponse(BaseModel):
+class ProcessRunQueuedResponse(BaseModel):
+    """
+    Returned immediately by POST /runs/{run_id}/process - the run is
+    enqueued to SQS for the worker (worker.py) to actually process, not
+    processed inline. Row/error/review counts aren't known yet at enqueue
+    time (unlike the old synchronous response) - poll GET /runs/{run_id}
+    for those once status is completed/partial.
+    """
+
     run_id: uuid.UUID
-    total_rows: int
-    processed_rows: int
-    error_rows: int
-    review_queue_rows: int
     status: str
 
 
