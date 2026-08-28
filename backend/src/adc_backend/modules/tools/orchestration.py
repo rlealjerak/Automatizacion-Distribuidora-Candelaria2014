@@ -15,6 +15,10 @@ live data *** (see sp_api_client.py / keepa_client.py module docstrings)
 - this orchestration logic itself (the control flow, error isolation,
 per-row sequencing) is what's actually tested here, via stub clients, not
 a claim that a full live run has ever been executed.
+
+A BUY or HIGH_RISK classification also creates an OpenClaw approval-queue
+item (modules/approvals/service.py::create_from_classification) - see
+docs/openclaw/ for the full spec this implements.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from sqlalchemy.orm import Session
 from adc_backend.config import get_settings
 from adc_backend.db.core_models import ListRun, ListRunStatus
 from adc_backend.modules.amazon.models import AmazonDataSnapshot, GatedApprovalStatus
+from adc_backend.modules.approvals.service import create_from_classification
 from adc_backend.modules.ingestion.models import LineItemType, ParseStatus, RawLineItem
 from adc_backend.modules.matching.engine import find_or_propose_match
 from adc_backend.modules.normalization.service import apply_normalization
@@ -113,12 +118,18 @@ def _process_one_item(db: Session, run: ListRun, item: RawLineItem, sp_api_clien
 
     _fetch_and_store_snapshot(db, run, item, match.asin, sp_api_client, keepa_client)
     try:
-        classify_line_item(db, run.id, item.id)
+        classification = classify_line_item(db, run.id, item.id)
     except RulesServiceError as e:
         # No active rules config, or no snapshot after all - shouldn't
         # normally happen given the guard above, but surfaces as a review
         # case rather than crashing the row.
         logger.warning("Classification skipped for raw_line_item %s: %s", item.id, e)
+        return
+
+    # BUY/HIGH_RISK classifications feed the OpenClaw Telegram approval
+    # queue - see modules/approvals/service.py for which labels qualify
+    # and why. No-op (returns None) for every other label.
+    create_from_classification(db, classification.id)
 
 
 def _fetch_and_store_snapshot(db: Session, run: ListRun, item: RawLineItem, asin: str, sp_api_client, keepa_client) -> None:
