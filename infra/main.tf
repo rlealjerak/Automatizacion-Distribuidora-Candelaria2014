@@ -91,6 +91,8 @@ module "ecs_cluster" {
     module.secrets.sp_api_secret_arn,
     module.secrets.keepa_secret_arn,
     module.secrets.api_key_secret_arn,
+    module.secrets.openclaw_backend_token_secret_arn,
+    module.secrets.telegram_reminder_secret_arn,
     module.rds.master_user_secret_arn,
   ]
 
@@ -116,5 +118,27 @@ module "ecs_cluster" {
   db_name             = module.rds.db_name
   db_username         = var.db_username
 
+  candelaria_backend_token_secret_name = module.secrets.openclaw_backend_token_secret_name
+  telegram_reminder_secret_name        = module.secrets.telegram_reminder_secret_name
+  # The ALB DNS name is always a valid Host header for /mcp (today's
+  # actual address); 127.0.0.1/localhost cover local dev. Add the real
+  # custom domain here too once Goal 2 (TLS) lands - see CLAUDE.md.
+  mcp_allowed_hosts = "${module.alb.dns_name},127.0.0.1,localhost"
+
   depends_on = [aws_security_group_rule.ecs_from_alb]
+}
+
+module "eventbridge_scheduler" {
+  source = "./modules/eventbridge_scheduler"
+
+  project_name = var.project_name
+  environment  = var.environment
+
+  cluster_arn                 = module.ecs_cluster.cluster_arn
+  task_definition_arn         = module.ecs_cluster.reminder_job_task_definition_arn
+  ecs_task_execution_role_arn = module.ecs_cluster.task_execution_role_arn
+  ecs_task_role_arn           = module.ecs_cluster.task_role_arn
+
+  public_subnet_ids     = module.network.public_subnet_ids
+  ecs_security_group_id = module.network.ecs_security_group_id
 }

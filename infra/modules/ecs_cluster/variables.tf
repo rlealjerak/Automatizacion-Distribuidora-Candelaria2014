@@ -87,6 +87,21 @@ variable "api_key_secret_name" {
   type = string
 }
 
+variable "candelaria_backend_token_secret_name" {
+  description = "Secrets Manager name for the static bearer token /mcp validates (OpenClaw's MCP client)."
+  type        = string
+}
+
+variable "telegram_reminder_secret_name" {
+  description = "Secrets Manager name for the reminder job's Telegram bot token + chat id."
+  type        = string
+}
+
+variable "mcp_allowed_hosts" {
+  description = "Comma-separated Host header allowlist for the /mcp surface (mcp SDK's DNS-rebinding protection) - see backend config.py's mcp_allowed_hosts docstring."
+  type        = string
+}
+
 variable "sp_api_seller_id" {
   type = string
 }

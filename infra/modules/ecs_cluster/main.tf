@@ -115,6 +115,9 @@ locals {
     { name = "KEEPA_SECRET_NAME", value = var.keepa_secret_name },
     { name = "DB_SECRET_NAME", value = var.db_secret_name },
     { name = "API_KEY_SECRET_NAME", value = var.api_key_secret_name },
+    { name = "CANDELARIA_BACKEND_TOKEN_SECRET_NAME", value = var.candelaria_backend_token_secret_name },
+    { name = "TELEGRAM_REMINDER_SECRET_NAME", value = var.telegram_reminder_secret_name },
+    { name = "MCP_ALLOWED_HOSTS", value = var.mcp_allowed_hosts },
     { name = "SP_API_SELLER_ID", value = var.sp_api_seller_id },
     { name = "DB_HOST", value = var.db_host },
     { name = "DB_PORT", value = tostring(var.db_port) },
@@ -247,4 +250,54 @@ resource "aws_ecs_service" "worker" {
   }
 
   depends_on = [aws_iam_role_policy_attachment.ecs_task_execution_managed]
+}
+
+# --- Task definition only: the OpenClaw approval reminder job ---
+#
+# No aws_ecs_service here, deliberately - unlike the worker above, this
+# doesn't run continuously. modules/eventbridge_scheduler fires
+# ecs:RunTask against this task definition once a minute, each run a
+# fresh one-shot task that checks the approval queue and exits (see
+# backend/src/adc_backend/reminder_job.py). Chosen over a Lambda: reuses
+# this same image/task-role/IAM pattern instead of a second build/deploy
+# pipeline - see docs/openclaw/BACKEND_CHANGES_FOR_OPENCLAW.md Section 5.
+# Same task role as backend/worker above (already grants
+# secretsmanager:GetSecretValue on every secret_arns entry, which now
+# includes the Telegram secret this job reads).
+
+resource "aws_cloudwatch_log_group" "reminder_job" {
+  name              = "/ecs/${var.project_name}-${var.environment}-reminder-job"
+  retention_in_days = 30
+}
+
+resource "aws_ecs_task_definition" "reminder_job" {
+  family                   = "${var.project_name}-${var.environment}-reminder-job"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = var.task_cpu
+  memory                   = var.task_memory
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([
+    {
+      name        = "reminder-job"
+      image       = var.container_image
+      essential   = true
+      command     = ["python", "-m", "adc_backend.reminder_job"]
+      environment = local.backend_environment
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.reminder_job.name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "reminder-job"
+        }
+      }
+    }
+  ])
+
+  tags = {
+    Name = "${var.project_name}-${var.environment}-reminder-job-task"
+  }
 }
