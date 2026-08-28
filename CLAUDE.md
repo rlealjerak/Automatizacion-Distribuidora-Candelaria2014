@@ -169,6 +169,100 @@ owner must be able to see *why*, not just the label.
 
 ---
 
+## Current status (updated 2026-08-28 — OpenClaw approval-queue backend)
+
+**Scope change from `NEXT_PHASE_PLAN.md`'s original sequencing: OpenClaw
+work is now happening in parallel with this backend, not gated behind
+Goal 2 (TLS).** The user is building OpenClaw's own side (Telegram bot,
+ECS/EFS deployment) separately; this session covers only the backend
+changes `docs/openclaw/BACKEND_CHANGES_FOR_OPENCLAW.md` specifies
+(committed to the repo along with its three source specs -
+`OPENCLAW_TECHNICAL_SPEC.md`, `OPENCLAW_APPROVAL_STATE_MACHINE_SPEC.md`,
+`OPENCLAW_DEPLOYMENT_PLAN.md` - all four had only ever existed as local
+files outside the repo until now, same issue as `NEXT_PHASE_PLAN.md`
+earlier this session). Branch: `feat/openclaw-approval-queue`.
+
+**Built:** a new `approval_queue` table + migration
+(`modules/approvals/`), an MCP server exposing the three tools OpenClaw
+calls (`list_queue`/`approve_decision`/`reorder_queue`, mounted at `/mcp`
+behind a static-bearer-token middleware - `modules/mcp_server/`), the
+integration hook that populates the queue from the existing rules engine
+(`orchestration.py`, one line added after `classify_line_item`), and a
+one-shot reminder job (`reminder_job.py`) fired every minute by a new
+EventBridge Scheduler → `ecs:RunTask` against a new task definition
+(no service - it's not long-running). 146/146 tests pass locally
+(30 new), migration `upgrade→downgrade→upgrade` cycle verified, and the
+whole path was smoke-tested for real against local Postgres (seed a BUY
+classification → real `/mcp` `list_queue` call → real JSON back).
+`terraform validate` passes and a real `terraform plan` against the live
+account shows exactly the expected diff (2 new secrets, the new
+scheduler role/schedule/task-def, both existing task definitions getting
+a new revision for the added env vars) - **not applied**.
+
+**Three explicit decisions made beyond what the specs said, all
+user-confirmed:**
+1. **Both `BUY` and `HIGH_RISK` classifications gate an approval, not
+   BUY-only** as the specs floated - HIGH_RISK is "flagged riskier," not
+   excluded, so it's still a real purchase decision. New items insert
+   with BUY ahead of HIGH_RISK in the queue (insertion-time only - never
+   reorders an already-queued item, so this doesn't conflict with the
+   locked state machine's "nothing reorders itself automatically" rule).
+2. **The reminder job calls the Telegram Bot API directly** (new
+   `telegram-reminder` secret) rather than asking OpenClaw to send it -
+   OpenClaw's finalized deployment plan confirmed it takes zero inbound
+   traffic (loopback-only, no ALB), so there's no path to ask it. This is
+   a deliberate, narrow exception to "OpenClaw owns Telegram conversation."
+3. **EventBridge Scheduler → ECS RunTask, not Lambda**, for the reminder
+   job - reuses the existing shared-image/task-role pattern instead of a
+   second build/deploy pipeline.
+
+**Real bugs found and fixed while building this, not hypothetical:**
+- The `mcp` Python SDK's 2.x line renamed `FastMCP`→`MCPServer` and moved
+  `stateless_http`/`json_response` from the constructor onto
+  `streamable_http_app()` - caught by actually installing and exercising
+  the package locally before writing `modules/mcp_server/server.py`
+  against it, not assumed from (now-outdated) tutorials.
+- The same SDK's transport security rejects **every** request with a 421
+  unless `allowed_hosts` is explicitly configured (DNS-rebinding
+  protection, on by default) - would have silently 421'd all of
+  OpenClaw's real traffic. Fixed via a new configurable
+  `mcp_allowed_hosts` setting, wired to the real ALB DNS name in
+  Terraform.
+- `ApprovalQueue`'s timestamp columns needed `DateTime(timezone=True)`,
+  unlike most other timestamp columns in this schema - reminder_job.py
+  does real arithmetic against a fresh `datetime.now(UTC)`, which breaks
+  once a naive-column value round-trips through Postgres. (Elsewhere in
+  this codebase the same `datetime.now(UTC)`-into-a-naive-column pattern
+  is harmless because those values are only ever displayed, never used
+  in later time-math - found by actually running the reminder-cadence
+  tests, not assumed.)
+- `resolve_active_item`'s two UPDATEs (clear old active flag, set new
+  one) needed an explicit intermediate `flush()` - without it,
+  `uq_approval_queue_one_active_item`'s per-statement unique check could
+  see both flags true at once, depending on SQLAlchemy's flush ordering.
+- `MCPServer`'s session manager can only be `.run()` once per process,
+  ever - meant this test suite's existing per-file
+  `with TestClient(app) as client:` convention silently breaks the
+  moment a second test file does the same thing. Fixed with a new
+  shared, session-scoped `tests/conftest.py::app_client` fixture
+  (`test_health.py` now uses it too).
+
+**What's still open, deliberately not done this session:**
+- Real secret values (`openclaw-backend-token`, `telegram-reminder`'s
+  bot token + chat id) - the placeholder-then-populate-by-hand pattern
+  every other secret uses. `telegram-reminder`'s `chat_id` specifically
+  can't be filled until the owner has paired with OpenClaw's bot (the
+  user's parallel track).
+- `terraform apply` - plan reviewed, not applied; nothing in this
+  session touched real AWS.
+- OpenClaw's own side entirely (Telegram bot registration, EFS, its ECS
+  service, pairing) - `docs/openclaw/OPENCLAW_DEPLOYMENT_PLAN.md` covers
+  it, out of scope here.
+- Goal 2 (TLS/HTTPS) from `NEXT_PHASE_PLAN.md` - still open, still
+  blocked on domain registration, unaffected by this session either way.
+
+---
+
 ## Current status (updated 2026-08-20, evening — Goal 1 of `NEXT_PHASE_PLAN.md`)
 
 **Goal 1 (SQS worker as an independent ECS service) is done and fully
