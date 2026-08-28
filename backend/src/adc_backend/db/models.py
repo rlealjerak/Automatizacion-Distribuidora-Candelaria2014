@@ -14,6 +14,7 @@ from __future__ import annotations
 from adc_backend.db.base import Base
 from adc_backend.db.core_models import ListRun, Supplier
 from adc_backend.modules.amazon.models import AmazonDataSnapshot
+from adc_backend.modules.approvals.models import ApprovalQueue
 from adc_backend.modules.ingestion.models import RawLineItem, UnitLookup
 from adc_backend.modules.matching.models import ProductMatch
 from adc_backend.modules.review.models import ManualReviewQueue
@@ -21,6 +22,7 @@ from adc_backend.modules.rules.models import BusinessRulesConfig, Classification
 
 __all__ = [
     "AmazonDataSnapshot",
+    "ApprovalQueue",
     "Base",
     "BusinessRulesConfig",
     "ClassificationResult",
