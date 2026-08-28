@@ -39,6 +39,27 @@ class Settings(BaseSettings):
     db_secret_name: str = ""  # RDS-managed master user secret
     api_key_secret_name: str = ""  # shared key OpenClaw/callers send as X-Api-Key - see modules/auth.py
 
+    # Static bearer token OpenClaw's MCP client sends to /mcp - separate
+    # credential from api_key_secret_name above (different surface,
+    # different caller expectation - see modules/mcp_server/auth.py).
+    candelaria_backend_token_secret_name: str = ""
+
+    # Bot token + target chat id for the reminder job's direct Telegram
+    # calls - see reminder_job.py. Not read by the main API/worker at all,
+    # only by the reminder job, but declared here alongside every other
+    # secret name for consistency.
+    telegram_reminder_secret_name: str = ""
+
+    # Comma-separated Host header allowlist for the /mcp surface. The
+    # `mcp` SDK's streamable-http transport rejects every request with a
+    # 421 unless the Host header is explicitly allowlisted (DNS-rebinding
+    # protection, on by default) - found live while building
+    # modules/mcp_server/. Must include whatever the ALB is actually
+    # reached at: the raw ALB DNS name today, the real custom domain once
+    # Goal 2 (TLS) lands - see infra/modules/ecs_cluster. Defaults cover
+    # local dev only.
+    mcp_allowed_hosts: str = "127.0.0.1,localhost"
+
     # Non-secret: this seller's own Amazon Selling Partner ID, needed for
     # the SP-API listing-restrictions check (it's scoped per-seller, not
     # just per-ASIN). Not a credential - just an account identifier.

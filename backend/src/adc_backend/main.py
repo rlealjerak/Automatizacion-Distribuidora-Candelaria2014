@@ -16,6 +16,8 @@ from fastapi import FastAPI
 
 from adc_backend.config import get_settings
 from adc_backend.modules.auth import require_api_key_dependency
+from adc_backend.modules.mcp_server.auth import BearerAuthMiddleware
+from adc_backend.modules.mcp_server.server import build_mcp_asgi_app, mcp_server
 from adc_backend.modules.tools.router import router as tools_router
 
 logging.basicConfig(level=logging.INFO)
@@ -41,7 +43,13 @@ async def lifespan(app: FastAPI):
         settings.aws_region,
         settings.s3_bucket_name or "(unset)",
     )
-    yield
+    # MCPServer's session manager must be entered by whatever app actually
+    # serves requests - a mounted sub-app's own lifespan never runs, so
+    # this has to happen here, not inside modules/mcp_server/server.py.
+    # Skipping this silently no-ops every /mcp call (found live while
+    # building this - not documented anywhere obvious).
+    async with mcp_server.session_manager.run():
+        yield
 
 
 app = FastAPI(
@@ -62,3 +70,11 @@ async def health() -> dict:
 # Every route below requires X-Api-Key - see modules/auth.py for why this
 # exists at all and what it does (and doesn't) protect against.
 app.include_router(tools_router, dependencies=[require_api_key_dependency])
+
+# OpenClaw's MCP tool surface - separate auth (a static bearer token, not
+# X-Api-Key - see modules/mcp_server/auth.py), mounted at root rather than
+# "/mcp" because streamable_http_app()'s own single route is already
+# "/mcp" (see modules/mcp_server/server.py::build_mcp_asgi_app for why).
+# Routes registered above (/health, tools_router) still match first -
+# this only catches paths nothing else claims.
+app.mount("/", BearerAuthMiddleware(build_mcp_asgi_app()))

@@ -29,6 +29,10 @@ python-multipart = "^0.0.17"
 # first time (2026-08-15) with `poetry install --only main` surfaced a
 # real ModuleNotFoundError at container startup.
 httpx = "^0.27.0"
+# Official MCP Python SDK - backs modules/mcp_server/, the OpenClaw-facing
+# streamable-http tool surface (list_queue/approve_decision/reorder_queue).
+# See docs/openclaw/OPENCLAW_TECHNICAL_SPEC.md Section 2.
+mcp = "^2.1.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.0"
