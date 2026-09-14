@@ -169,6 +169,51 @@ owner must be able to see *why*, not just the label.
 
 ---
 
+## Current status (updated 2026-09-14 — OpenClaw approval-queue infra applied)
+
+**`terraform apply` for `feat/openclaw-approval-queue` is done** — the one
+item explicitly left open at the end of the 2026-08-28 session below.
+`terraform plan` now reports "No changes." against the real account: the
+two new placeholder secrets (`adc/prod/openclaw-backend-token`,
+`adc/prod/telegram-reminder`, same `ignore_changes = [secret_string]`
+pattern as every other secret so a later `put-secret-value` won't get
+reverted), the reminder-job task definition, the EventBridge Scheduler
+role/policy/schedule, and both existing task definitions' new revisions
+(added `CANDELARIA_BACKEND_TOKEN_SECRET_NAME`/`MCP_ALLOWED_HOSTS`/
+`TELEGRAM_REMINDER_SECRET_NAME` env vars) are all live. Confirmed for
+real: `adc-prod-backend` and `adc-prod-worker` both `1/1` running with
+deployment `COMPLETED` on the new revisions; the schedule itself
+(`aws scheduler get-schedule`) shows `rate(1 minute)` / `state: ENABLED`.
+
+**A seventh IAM gap, same pattern as the six earlier rounds:** `apply`
+first failed on `aws_scheduler_schedule.reminder_job` -
+`scheduler:CreateSchedule` wasn't granted, and the existing `PassRole`
+statement was scoped to `PassedToService: ecs-tasks.amazonaws.com` only,
+which doesn't cover passing the scheduler's own execution role to
+`scheduler.amazonaws.com` at schedule-creation time. Fixed in
+`infra/claude-code-iam-policy.json` (new `SchedulerReadWrite` and
+`PassSchedulerRoleToScheduler` statements, both scoped to `adc-*`) -
+applied by the account admin directly against the real `claude-code` IAM
+user (it has no `iam:PutUserPolicy` on itself, same as every prior
+round), then the apply retried clean.
+
+**Confirmed, not yet a live risk:** the schedule is now firing
+`reminder_job.py` every minute for real, but `check_and_send_reminder`
+returns `"no_active_item"` and exits before ever touching the
+still-placeholder `telegram-reminder` secret whenever the approval queue
+is empty (`reminder_job.py:55-57`) - true right now, since no real
+supplier-list run has landed a `BUY`/`HIGH_RISK` classification in prod
+yet. This stops being harmless the moment one does, so populating real
+`telegram-reminder`/`openclaw-backend-token` values is worth doing before
+that happens, not after.
+
+**Still open, unchanged from 2026-08-28:** real secret values for both
+new secrets (`telegram-reminder`'s `chat_id` still blocked on the owner
+pairing with OpenClaw's bot), OpenClaw's own side entirely, and Goal 2
+(TLS/HTTPS) - still blocked on domain registration.
+
+---
+
 ## Current status (updated 2026-08-28 — OpenClaw approval-queue backend)
 
 **Scope change from `NEXT_PHASE_PLAN.md`'s original sequencing: OpenClaw
