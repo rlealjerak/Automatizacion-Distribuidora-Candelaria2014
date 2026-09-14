@@ -195,6 +195,29 @@
       }
     },
     {
+      "Sid": "SchedulerReadWrite",
+      "Effect": "Allow",
+      "Action": [
+        "scheduler:CreateSchedule",
+        "scheduler:GetSchedule",
+        "scheduler:UpdateSchedule",
+        "scheduler:DeleteSchedule",
+        "scheduler:ListSchedules",
+        "scheduler:TagResource",
+        "scheduler:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:scheduler:us-east-1:617464676572:schedule/default/adc-*"
+    },
+    {
+      "Sid": "PassSchedulerRoleToScheduler",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::617464676572:role/adc-*",
+      "Condition": {
+        "StringEquals": { "iam:PassedToService": "scheduler.amazonaws.com" }
+      }
+    },
+    {
       "Sid": "CreateServiceLinkedRolesForElbAndEcs",
       "Effect": "Allow",
       "Action": "iam:CreateServiceLinkedRole",
