@@ -141,7 +141,7 @@ Combining the security-hardened baseline from the docs with everything decided e
   mcp: {
     servers: {
       candelaria_backend: {
-        url: "https://api.candelaria2014.com/mcp",  // stub URL until domain/TLS live
+        url: "https://api.distribuidoracandelaria2014ops.com/mcp",  // real domain/TLS live as of 2026-10-05
         transport: "streamable-http",
         requestTimeoutMs: 20000,
         connectionTimeoutMs: 5000,

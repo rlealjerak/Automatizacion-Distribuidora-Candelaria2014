@@ -38,7 +38,7 @@ Source: `docs.openclaw.ai/gateway/configuration-reference`, `mcp.servers` schema
   mcp: {
     servers: {
       candelaria_backend: {
-        url: "https://api.candelaria2014.com/mcp",   // pending real domain
+        url: "https://api.distribuidoracandelaria2014ops.com/mcp",   // real domain/TLS live as of 2026-10-05
         transport: "streamable-http",
         requestTimeoutMs: 20000,
         connectionTimeoutMs: 5000,
@@ -107,7 +107,7 @@ No parameters — always returns full current state.
     "pending_started_at": "2026-08-23T14:05:11Z",
     "last_reminder_at": "2026-08-23T14:35:11Z",
     "reminder_count": 2,
-    "detail_url": "https://api.candelaria2014.com/approvals/apr_8f3a2b"
+    "detail_url": "https://api.distribuidoracandelaria2014ops.com/approvals/apr_8f3a2b"
   },
   "queued_items": [
     {
