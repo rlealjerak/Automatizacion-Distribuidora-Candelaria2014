@@ -169,6 +169,90 @@ owner must be able to see *why*, not just the label.
 
 ---
 
+## Current status (updated 2026-10-05 — Goal 2/TLS live, OpenClaw secrets closed out)
+
+**Both items blocking OpenClaw integration going into this session are
+now closed.** `adc/prod/openclaw-backend-token` was still the Terraform
+placeholder from 2026-09-12 — it's a shared secret this backend mints
+and checks itself (`modules/mcp_server/auth.py`'s `BearerAuthMiddleware`),
+not anything external to wait on, so a cryptographically random
+256-bit hex token was generated and stored directly
+(`{"token": "..."}` shape) with no code change needed. The user
+separately populated `adc/prod/telegram-reminder` (`{"bot_token",
+"chat_id"}`) the same day, after pairing with OpenClaw's bot.
+
+**Goal 2 (TLS/HTTPS) is done and live-verified** — domain
+`distribuidoracandelaria2014ops.com` registered at Namecheap (not
+Route53 - DNS itself still needed delegating to Route53 for ACM's DNS
+validation to work against this project's IaC). New `modules/dns`
+(hosted zone, ACM cert for `api.distribuidoracandelaria2014ops.com`,
+DNS validation records, Route53 alias record to the ALB) and
+`modules/alb` extended with a `certificate_arn`-gated HTTPS listener
+(443, `ELBSecurityPolicy-TLS13-1-2-2021-06`) plus an HTTP→HTTPS 301
+redirect replacing the old plain forward. `MCP_ALLOWED_HOSTS` now
+includes the real domain alongside the ALB's raw DNS name. Confirmed
+live: `https://api.distribuidoracandelaria2014ops.com/health` → real
+200 with a valid cert (`CN=api.distribuidoracandelaria2014ops.com`,
+expires 2027-04-21); plain `http://` → real 301 to `https://`. The
+`X-Api-Key` header no longer travels in plaintext - the one gap flagged
+since 2026-08-16 is closed.
+
+**An eighth IAM gap, same pattern as the prior seven:** `claude-code` had
+zero `route53:*`/`acm:*` permissions (confirmed via real
+`AccessDeniedException`s on `ListHostedZones`/`ListCertificates`/
+`CreateHostedZone`). Fixed in `infra/claude-code-iam-policy.json` (new
+`Route53ReadWrite` and `AcmReadWrite` statements, both `Resource: "*"`
+since hosted zone IDs/cert ARNs aren't name-scopable the way `adc-*` log
+groups/IAM roles are) - applied by the account admin directly against
+the real IAM user, same as every prior round, then the blocked
+`CreateHostedZone` call succeeded on retry.
+
+**Applied in three deliberate passes, not one `terraform apply`,** because
+of a real chicken-and-egg: `aws_lb_listener.https`'s `count` can't
+resolve until ACM's cert is validated, and validation can't succeed
+until Namecheap's nameservers are pointed at the new Route53 zone - which
+doesn't exist until it's created. Pass 1: `-target` the hosted zone
+alone, hand the 4 real AWS nameservers to the user for Namecheap (NS
+propagation checked for real via `dig @8.8.8.8` - happened to clear in
+well under an hour, not the up-to-48h worst case). Pass 2: `-target`
+just `module.dns` once the zone was confirmed authoritative - cert
+requested and DNS-validated in the same apply. Pass 3: a full, untargeted
+`terraform plan`, manually read end-to-end (not just the summary line)
+before applying, specifically because the two `-target` passes before it
+are known to make Terraform misreport unrelated resources as changed
+when they're not actually pending.
+
+**Two real bugs caught by that manual plan review before they shipped:**
+1. The ALB security group's `description` field was reworded for
+   accuracy ("HTTP from anywhere" → mentions HTTPS too) - but
+   `description` is immutable on an AWS security group once created, so
+   that one-line wording edit would have forced a full SG replacement,
+   cascading into replacing the cross-module
+   `aws_security_group_rule.ecs_from_alb` in root `main.tf` too. Reverted
+   the wording, left a comment explaining why it stays slightly stale.
+2. The HTTP listener's `default_action` initially used a single
+   resource with `type` and `target_group_arn` both set by ternary
+   (`null` when redirecting) - the AWS provider logged "Invalid
+   Attribute Combination... will be an error in a future release" on
+   apply, because specifying an attribute as an explicit `null` isn't the
+   same as omitting it for this provider's validation. Fixed by splitting
+   into two mutually-exclusive listener resources
+   (`http_forward`/`http_redirect`, gated by `count`) and using
+   `terraform state mv` to rename the existing live listener into the
+   new address instead of letting Terraform destroy/recreate a listener
+   that was already working correctly.
+
+**Still open:** OpenClaw's own build/deployment entirely (Telegram bot
+service, pairing confirmed working per `telegram-reminder` now holding a
+real `chat_id`, but OpenClaw's ECS/EFS side itself is the user's parallel
+track, unverified from this repo) - this remains the actual blocker
+between "backend is demo-able via direct API calls" and "client talks to
+a Telegram bot." Unchanged from earlier sessions: RDS
+`deletion_protection` still `false`, and the Keepa key briefly logged in
+plaintext back on 2026-08-15 still hasn't been rotated.
+
+---
+
 ## Current status (updated 2026-09-14 — OpenClaw approval-queue infra applied)
 
 **`terraform apply` for `feat/openclaw-approval-queue` is done** — the one
