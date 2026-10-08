@@ -169,6 +169,229 @@ owner must be able to see *why*, not just the label.
 
 ---
 
+## Current status (updated 2026-10-05 — Goal 2/TLS live, OpenClaw secrets closed out)
+
+**Both items blocking OpenClaw integration going into this session are
+now closed.** `adc/prod/openclaw-backend-token` was still the Terraform
+placeholder from 2026-09-12 — it's a shared secret this backend mints
+and checks itself (`modules/mcp_server/auth.py`'s `BearerAuthMiddleware`),
+not anything external to wait on, so a cryptographically random
+256-bit hex token was generated and stored directly
+(`{"token": "..."}` shape) with no code change needed. The user
+separately populated `adc/prod/telegram-reminder` (`{"bot_token",
+"chat_id"}`) the same day, after pairing with OpenClaw's bot.
+
+**Goal 2 (TLS/HTTPS) is done and live-verified** — domain
+`distribuidoracandelaria2014ops.com` registered at Namecheap (not
+Route53 - DNS itself still needed delegating to Route53 for ACM's DNS
+validation to work against this project's IaC). New `modules/dns`
+(hosted zone, ACM cert for `api.distribuidoracandelaria2014ops.com`,
+DNS validation records, Route53 alias record to the ALB) and
+`modules/alb` extended with a `certificate_arn`-gated HTTPS listener
+(443, `ELBSecurityPolicy-TLS13-1-2-2021-06`) plus an HTTP→HTTPS 301
+redirect replacing the old plain forward. `MCP_ALLOWED_HOSTS` now
+includes the real domain alongside the ALB's raw DNS name. Confirmed
+live: `https://api.distribuidoracandelaria2014ops.com/health` → real
+200 with a valid cert (`CN=api.distribuidoracandelaria2014ops.com`,
+expires 2027-04-21); plain `http://` → real 301 to `https://`. The
+`X-Api-Key` header no longer travels in plaintext - the one gap flagged
+since 2026-08-16 is closed.
+
+**An eighth IAM gap, same pattern as the prior seven:** `claude-code` had
+zero `route53:*`/`acm:*` permissions (confirmed via real
+`AccessDeniedException`s on `ListHostedZones`/`ListCertificates`/
+`CreateHostedZone`). Fixed in `infra/claude-code-iam-policy.json` (new
+`Route53ReadWrite` and `AcmReadWrite` statements, both `Resource: "*"`
+since hosted zone IDs/cert ARNs aren't name-scopable the way `adc-*` log
+groups/IAM roles are) - applied by the account admin directly against
+the real IAM user, same as every prior round, then the blocked
+`CreateHostedZone` call succeeded on retry.
+
+**Applied in three deliberate passes, not one `terraform apply`,** because
+of a real chicken-and-egg: `aws_lb_listener.https`'s `count` can't
+resolve until ACM's cert is validated, and validation can't succeed
+until Namecheap's nameservers are pointed at the new Route53 zone - which
+doesn't exist until it's created. Pass 1: `-target` the hosted zone
+alone, hand the 4 real AWS nameservers to the user for Namecheap (NS
+propagation checked for real via `dig @8.8.8.8` - happened to clear in
+well under an hour, not the up-to-48h worst case). Pass 2: `-target`
+just `module.dns` once the zone was confirmed authoritative - cert
+requested and DNS-validated in the same apply. Pass 3: a full, untargeted
+`terraform plan`, manually read end-to-end (not just the summary line)
+before applying, specifically because the two `-target` passes before it
+are known to make Terraform misreport unrelated resources as changed
+when they're not actually pending.
+
+**Two real bugs caught by that manual plan review before they shipped:**
+1. The ALB security group's `description` field was reworded for
+   accuracy ("HTTP from anywhere" → mentions HTTPS too) - but
+   `description` is immutable on an AWS security group once created, so
+   that one-line wording edit would have forced a full SG replacement,
+   cascading into replacing the cross-module
+   `aws_security_group_rule.ecs_from_alb` in root `main.tf` too. Reverted
+   the wording, left a comment explaining why it stays slightly stale.
+2. The HTTP listener's `default_action` initially used a single
+   resource with `type` and `target_group_arn` both set by ternary
+   (`null` when redirecting) - the AWS provider logged "Invalid
+   Attribute Combination... will be an error in a future release" on
+   apply, because specifying an attribute as an explicit `null` isn't the
+   same as omitting it for this provider's validation. Fixed by splitting
+   into two mutually-exclusive listener resources
+   (`http_forward`/`http_redirect`, gated by `count`) and using
+   `terraform state mv` to rename the existing live listener into the
+   new address instead of letting Terraform destroy/recreate a listener
+   that was already working correctly.
+
+**Still open:** OpenClaw's own build/deployment entirely (Telegram bot
+service, pairing confirmed working per `telegram-reminder` now holding a
+real `chat_id`, but OpenClaw's ECS/EFS side itself is the user's parallel
+track, unverified from this repo) - this remains the actual blocker
+between "backend is demo-able via direct API calls" and "client talks to
+a Telegram bot." Unchanged from earlier sessions: RDS
+`deletion_protection` still `false`, and the Keepa key briefly logged in
+plaintext back on 2026-08-15 still hasn't been rotated.
+
+---
+
+## Current status (updated 2026-09-14 — OpenClaw approval-queue infra applied)
+
+**`terraform apply` for `feat/openclaw-approval-queue` is done** — the one
+item explicitly left open at the end of the 2026-08-28 session below.
+`terraform plan` now reports "No changes." against the real account: the
+two new placeholder secrets (`adc/prod/openclaw-backend-token`,
+`adc/prod/telegram-reminder`, same `ignore_changes = [secret_string]`
+pattern as every other secret so a later `put-secret-value` won't get
+reverted), the reminder-job task definition, the EventBridge Scheduler
+role/policy/schedule, and both existing task definitions' new revisions
+(added `CANDELARIA_BACKEND_TOKEN_SECRET_NAME`/`MCP_ALLOWED_HOSTS`/
+`TELEGRAM_REMINDER_SECRET_NAME` env vars) are all live. Confirmed for
+real: `adc-prod-backend` and `adc-prod-worker` both `1/1` running with
+deployment `COMPLETED` on the new revisions; the schedule itself
+(`aws scheduler get-schedule`) shows `rate(1 minute)` / `state: ENABLED`.
+
+**A seventh IAM gap, same pattern as the six earlier rounds:** `apply`
+first failed on `aws_scheduler_schedule.reminder_job` -
+`scheduler:CreateSchedule` wasn't granted, and the existing `PassRole`
+statement was scoped to `PassedToService: ecs-tasks.amazonaws.com` only,
+which doesn't cover passing the scheduler's own execution role to
+`scheduler.amazonaws.com` at schedule-creation time. Fixed in
+`infra/claude-code-iam-policy.json` (new `SchedulerReadWrite` and
+`PassSchedulerRoleToScheduler` statements, both scoped to `adc-*`) -
+applied by the account admin directly against the real `claude-code` IAM
+user (it has no `iam:PutUserPolicy` on itself, same as every prior
+round), then the apply retried clean.
+
+**Confirmed, not yet a live risk:** the schedule is now firing
+`reminder_job.py` every minute for real, but `check_and_send_reminder`
+returns `"no_active_item"` and exits before ever touching the
+still-placeholder `telegram-reminder` secret whenever the approval queue
+is empty (`reminder_job.py:55-57`) - true right now, since no real
+supplier-list run has landed a `BUY`/`HIGH_RISK` classification in prod
+yet. This stops being harmless the moment one does, so populating real
+`telegram-reminder`/`openclaw-backend-token` values is worth doing before
+that happens, not after.
+
+**Still open, unchanged from 2026-08-28:** real secret values for both
+new secrets (`telegram-reminder`'s `chat_id` still blocked on the owner
+pairing with OpenClaw's bot), OpenClaw's own side entirely, and Goal 2
+(TLS/HTTPS) - still blocked on domain registration.
+
+---
+
+## Current status (updated 2026-08-28 — OpenClaw approval-queue backend)
+
+**Scope change from `NEXT_PHASE_PLAN.md`'s original sequencing: OpenClaw
+work is now happening in parallel with this backend, not gated behind
+Goal 2 (TLS).** The user is building OpenClaw's own side (Telegram bot,
+ECS/EFS deployment) separately; this session covers only the backend
+changes `docs/openclaw/BACKEND_CHANGES_FOR_OPENCLAW.md` specifies
+(committed to the repo along with its three source specs -
+`OPENCLAW_TECHNICAL_SPEC.md`, `OPENCLAW_APPROVAL_STATE_MACHINE_SPEC.md`,
+`OPENCLAW_DEPLOYMENT_PLAN.md` - all four had only ever existed as local
+files outside the repo until now, same issue as `NEXT_PHASE_PLAN.md`
+earlier this session). Branch: `feat/openclaw-approval-queue`.
+
+**Built:** a new `approval_queue` table + migration
+(`modules/approvals/`), an MCP server exposing the three tools OpenClaw
+calls (`list_queue`/`approve_decision`/`reorder_queue`, mounted at `/mcp`
+behind a static-bearer-token middleware - `modules/mcp_server/`), the
+integration hook that populates the queue from the existing rules engine
+(`orchestration.py`, one line added after `classify_line_item`), and a
+one-shot reminder job (`reminder_job.py`) fired every minute by a new
+EventBridge Scheduler → `ecs:RunTask` against a new task definition
+(no service - it's not long-running). 146/146 tests pass locally
+(30 new), migration `upgrade→downgrade→upgrade` cycle verified, and the
+whole path was smoke-tested for real against local Postgres (seed a BUY
+classification → real `/mcp` `list_queue` call → real JSON back).
+`terraform validate` passes and a real `terraform plan` against the live
+account shows exactly the expected diff (2 new secrets, the new
+scheduler role/schedule/task-def, both existing task definitions getting
+a new revision for the added env vars) - **not applied**.
+
+**Three explicit decisions made beyond what the specs said, all
+user-confirmed:**
+1. **Both `BUY` and `HIGH_RISK` classifications gate an approval, not
+   BUY-only** as the specs floated - HIGH_RISK is "flagged riskier," not
+   excluded, so it's still a real purchase decision. New items insert
+   with BUY ahead of HIGH_RISK in the queue (insertion-time only - never
+   reorders an already-queued item, so this doesn't conflict with the
+   locked state machine's "nothing reorders itself automatically" rule).
+2. **The reminder job calls the Telegram Bot API directly** (new
+   `telegram-reminder` secret) rather than asking OpenClaw to send it -
+   OpenClaw's finalized deployment plan confirmed it takes zero inbound
+   traffic (loopback-only, no ALB), so there's no path to ask it. This is
+   a deliberate, narrow exception to "OpenClaw owns Telegram conversation."
+3. **EventBridge Scheduler → ECS RunTask, not Lambda**, for the reminder
+   job - reuses the existing shared-image/task-role pattern instead of a
+   second build/deploy pipeline.
+
+**Real bugs found and fixed while building this, not hypothetical:**
+- The `mcp` Python SDK's 2.x line renamed `FastMCP`→`MCPServer` and moved
+  `stateless_http`/`json_response` from the constructor onto
+  `streamable_http_app()` - caught by actually installing and exercising
+  the package locally before writing `modules/mcp_server/server.py`
+  against it, not assumed from (now-outdated) tutorials.
+- The same SDK's transport security rejects **every** request with a 421
+  unless `allowed_hosts` is explicitly configured (DNS-rebinding
+  protection, on by default) - would have silently 421'd all of
+  OpenClaw's real traffic. Fixed via a new configurable
+  `mcp_allowed_hosts` setting, wired to the real ALB DNS name in
+  Terraform.
+- `ApprovalQueue`'s timestamp columns needed `DateTime(timezone=True)`,
+  unlike most other timestamp columns in this schema - reminder_job.py
+  does real arithmetic against a fresh `datetime.now(UTC)`, which breaks
+  once a naive-column value round-trips through Postgres. (Elsewhere in
+  this codebase the same `datetime.now(UTC)`-into-a-naive-column pattern
+  is harmless because those values are only ever displayed, never used
+  in later time-math - found by actually running the reminder-cadence
+  tests, not assumed.)
+- `resolve_active_item`'s two UPDATEs (clear old active flag, set new
+  one) needed an explicit intermediate `flush()` - without it,
+  `uq_approval_queue_one_active_item`'s per-statement unique check could
+  see both flags true at once, depending on SQLAlchemy's flush ordering.
+- `MCPServer`'s session manager can only be `.run()` once per process,
+  ever - meant this test suite's existing per-file
+  `with TestClient(app) as client:` convention silently breaks the
+  moment a second test file does the same thing. Fixed with a new
+  shared, session-scoped `tests/conftest.py::app_client` fixture
+  (`test_health.py` now uses it too).
+
+**What's still open, deliberately not done this session:**
+- Real secret values (`openclaw-backend-token`, `telegram-reminder`'s
+  bot token + chat id) - the placeholder-then-populate-by-hand pattern
+  every other secret uses. `telegram-reminder`'s `chat_id` specifically
+  can't be filled until the owner has paired with OpenClaw's bot (the
+  user's parallel track).
+- `terraform apply` - plan reviewed, not applied; nothing in this
+  session touched real AWS.
+- OpenClaw's own side entirely (Telegram bot registration, EFS, its ECS
+  service, pairing) - `docs/openclaw/OPENCLAW_DEPLOYMENT_PLAN.md` covers
+  it, out of scope here.
+- Goal 2 (TLS/HTTPS) from `NEXT_PHASE_PLAN.md` - still open, still
+  blocked on domain registration, unaffected by this session either way.
+
+---
+
 ## Current status (updated 2026-08-20, evening — Goal 1 of `NEXT_PHASE_PLAN.md`)
 
 **Goal 1 (SQS worker as an independent ECS service) is done and fully

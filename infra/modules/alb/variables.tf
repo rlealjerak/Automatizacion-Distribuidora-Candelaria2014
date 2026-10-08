@@ -17,3 +17,9 @@ variable "public_subnet_ids" {
 variable "container_port" {
   type = number
 }
+
+variable "certificate_arn" {
+  description = "Validated ACM certificate ARN. Empty string = HTTP-only bootstrap mode (see main.tf docstring)."
+  type        = string
+  default     = ""
+}

@@ -56,3 +56,43 @@ resource "aws_secretsmanager_secret_version" "api_key" {
     ignore_changes = [secret_string]
   }
 }
+
+# Static bearer token OpenClaw's MCP client sends to /mcp - a separate
+# credential from api_key above (different surface, different caller
+# expectation). See backend/src/adc_backend/modules/mcp_server/auth.py
+# and docs/openclaw/BACKEND_CHANGES_FOR_OPENCLAW.md Section 6.
+resource "aws_secretsmanager_secret" "openclaw_backend_token" {
+  name        = "${var.project_name}/${var.environment}/openclaw-backend-token"
+  description = "Static bearer token OpenClaw's MCP client sends to /mcp. Populated manually after apply."
+}
+
+resource "aws_secretsmanager_secret_version" "openclaw_backend_token" {
+  secret_id     = aws_secretsmanager_secret.openclaw_backend_token.id
+  secret_string = jsonencode({ token = "replace-me-via-console-or-cli" })
+
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
+}
+
+# Bot token + target chat id for reminder_job.py's direct Telegram calls -
+# see backend/src/adc_backend/telegram_notifier.py for why this backend
+# talks to Telegram directly at all (OpenClaw takes no inbound traffic,
+# per docs/openclaw/OPENCLAW_DEPLOYMENT_PLAN.md Section 4, so it can't be
+# asked to send the reminder itself). chat_id can only be populated once
+# the owner has paired with OpenClaw's bot - a real sequencing dependency
+# on that separate deployment track, not a blocker for provisioning the
+# secret container itself now.
+resource "aws_secretsmanager_secret" "telegram_reminder" {
+  name        = "${var.project_name}/${var.environment}/telegram-reminder"
+  description = "Telegram bot token + chat id for the approval reminder job. Populated manually after apply, once OpenClaw's bot is paired."
+}
+
+resource "aws_secretsmanager_secret_version" "telegram_reminder" {
+  secret_id     = aws_secretsmanager_secret.telegram_reminder.id
+  secret_string = jsonencode({ bot_token = "replace-me-via-console-or-cli", chat_id = "replace-me-via-console-or-cli" })
+
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
+}

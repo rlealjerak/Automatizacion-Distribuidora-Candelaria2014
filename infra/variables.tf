@@ -117,3 +117,17 @@ variable "sp_api_seller_id" {
   type        = string
   default     = "AGKTO8HZBBQC4"
 }
+
+# --- DNS / TLS (Goal 2) ---
+
+variable "domain_name" {
+  description = "Apex domain for this project, registered at Namecheap (not Route53 - see modules/dns). Route53 only hosts DNS for it after nameservers are manually pointed there."
+  type        = string
+  default     = "distribuidoracandelaria2014ops.com"
+}
+
+variable "backend_subdomain" {
+  description = "Subdomain label the backend API is served at, e.g. \"api\" for api.<domain_name>."
+  type        = string
+  default     = "api"
+}

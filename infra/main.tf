@@ -61,6 +61,28 @@ module "alb" {
   vpc_id            = module.network.vpc_id
   public_subnet_ids = module.network.public_subnet_ids
   container_port    = var.container_port
+  certificate_arn   = module.dns.certificate_arn
+}
+
+# See modules/dns/main.tf's docstring: the domain is registered at
+# Namecheap, not Route53 - this only creates the hosted zone + ACM cert
+# + alias record. Nameservers must be pointed at this zone's
+# `name_servers` output at the registrar before ACM's DNS validation
+# (and therefore module.alb's HTTPS listener) can go live - a one-time
+# manual step outside Terraform's reach. Until that happens, apply this
+# in two passes: first `-target=module.dns.aws_route53_zone.this` alone
+# to get the nameservers, then (after NS delegation propagates) a normal
+# full apply.
+module "dns" {
+  source = "./modules/dns"
+
+  project_name = var.project_name
+  environment  = var.environment
+  domain_name  = var.domain_name
+  subdomain    = var.backend_subdomain
+
+  alb_dns_name = module.alb.dns_name
+  alb_zone_id  = module.alb.zone_id
 }
 
 # The one inbound rule into the ECS tasks security group - from the ALB
@@ -91,6 +113,8 @@ module "ecs_cluster" {
     module.secrets.sp_api_secret_arn,
     module.secrets.keepa_secret_arn,
     module.secrets.api_key_secret_arn,
+    module.secrets.openclaw_backend_token_secret_arn,
+    module.secrets.telegram_reminder_secret_arn,
     module.rds.master_user_secret_arn,
   ]
 
@@ -116,5 +140,27 @@ module "ecs_cluster" {
   db_name             = module.rds.db_name
   db_username         = var.db_username
 
+  candelaria_backend_token_secret_name = module.secrets.openclaw_backend_token_secret_name
+  telegram_reminder_secret_name        = module.secrets.telegram_reminder_secret_name
+  # Keep the raw ALB DNS name valid too (useful for health checks /
+  # debugging straight against the ALB); 127.0.0.1/localhost cover local
+  # dev. The real custom domain is now included - Goal 2 (TLS).
+  mcp_allowed_hosts = "${module.dns.backend_hostname},${module.alb.dns_name},127.0.0.1,localhost"
+
   depends_on = [aws_security_group_rule.ecs_from_alb]
+}
+
+module "eventbridge_scheduler" {
+  source = "./modules/eventbridge_scheduler"
+
+  project_name = var.project_name
+  environment  = var.environment
+
+  cluster_arn                 = module.ecs_cluster.cluster_arn
+  task_definition_arn         = module.ecs_cluster.reminder_job_task_definition_arn
+  ecs_task_execution_role_arn = module.ecs_cluster.task_execution_role_arn
+  ecs_task_role_arn           = module.ecs_cluster.task_role_arn
+
+  public_subnet_ids     = module.network.public_subnet_ids
+  ecs_security_group_id = module.network.ecs_security_group_id
 }
