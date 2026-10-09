@@ -1,0 +1,100 @@
+// OpenClaw Gateway configuration - source of truth for this project.
+//
+// This file is checked into git as JSON5 (comments allowed) for
+// readability. The real runtime config the Gateway reads lives at
+// /home/node/.openclaw/openclaw.json on a persistent EFS volume (see
+// ../README.md's "First boot / config seeding" section) - that file
+// must be valid JSON (comments stripped), not JSON5. Edit THIS file,
+// then re-seed the volume; never hand-edit the runtime copy and expect
+// it to stay in sync with git.
+//
+// Verified for real against ghcr.io/openclaw/openclaw:2026.9.9
+// (2026-10-09, pulled and run locally - not copied from docs without
+// checking): `gateway.mode` is NOT auto-filled by the image's own
+// `doctor --fix` repair pass - a config missing it causes the Gateway
+// to refuse to start ("Gateway start blocked: existing config is
+// missing gateway.mode"). This file sets it explicitly for that reason.
+{
+  gateway: {
+    mode: "local",
+    bind: "loopback",        // no inbound needed at all - confirmed via docker inspect: image declares no EXPOSEd ports, matches OPENCLAW_DEPLOYMENT_PLAN.md Section 4's "no ALB, no public listener" finding
+    port: 18789,
+    auth: { mode: "token", token: "${OPENCLAW_GATEWAY_TOKEN}" },
+  },
+
+  session: {
+    dmScope: "main",         // single/dual-user (Rob + the client), not a shared multi-user inbox
+  },
+
+  channels: {
+    telegram: {
+      enabled: true,
+      botToken: "${TELEGRAM_BOT_TOKEN}",
+      dmPolicy: "pairing",    // true allowlist - unknown senders' messages are never processed until explicitly approved (docs.openclaw.ai/channels/pairing, confirmed in OPENCLAW_TECHNICAL_SPEC.md Section 1)
+
+      // Defense-in-depth on top of pairing, per OPENCLAW_TECHNICAL_SPEC.md
+      // Section 1's recommendation - confirmed as a real schema key
+      // (`channels.telegram.allowFrom`) via `openclaw config schema`.
+      // STILL EMPTY: fill with the client's and Rob's numeric Telegram
+      // user IDs once collected (see ../README.md's "Collecting
+      // Telegram user IDs" section - this is the one open item blocking
+      // a meaningful value here).
+      allowFrom: [],
+    },
+  },
+
+  // Belt-and-suspenders hardening beyond `tools.profile: "minimal"` -
+  // this bot's entire job is relaying approvals, never running shell
+  // commands or browsing the web (OPENCLAW_DEPLOYMENT_PLAN.md Section 7).
+  tools: {
+    profile: "minimal",
+    allow: ["bundle-mcp"],
+    deny: ["gateway", "cron", "sessions_spawn", "sessions_send", "exec", "process", "browser", "web_fetch", "web_search"],
+    elevated: { enabled: false },
+  },
+
+  // Model choice is a security control here, not just a quality choice
+  // (OPENCLAW_DEPLOYMENT_PLAN.md Section 0b) - OpenClaw holds this
+  // backend's bearer token and can call approve_decision/revoke_decision,
+  // so a frontier-tier model is used deliberately, not a cheaper one.
+  // claude-sonnet-5 chosen over claude-opus-5 as the default: strong
+  // tool-use/prompt-injection resistance at a cost appropriate for a
+  // single-user, low-message-volume approval bot - revisit if real
+  // usage ever shows it struggling, Opus 5 is the stronger fallback.
+  models: {
+    providers: {
+      anthropic: {
+        apiKey: "${ANTHROPIC_API_KEY}",
+      },
+    },
+  },
+  agents: {
+    entries: {
+      main: {
+        model: "anthropic/claude-sonnet-5",
+      },
+    },
+  },
+
+  mcp: {
+    servers: {
+      candelaria_backend: {
+        // Points at the REAL production backend - domain/TLS has been
+        // live since 2026-10-08 (see CLAUDE.md). OPENCLAW_DEPLOYMENT_PLAN.md's
+        // own checklist (Section 9, step 6) recommends pointing this at
+        // a STUB backend first, pairing and testing the full Telegram
+        // loop against fake data, THEN swapping to this real URL - no
+        // stub server exists in this repo yet, so that safer sequencing
+        // is a manual choice to make before first pairing, not something
+        // this file enforces. Swap this one line back to a local stub
+        // URL if you build one for that dry run.
+        url: "https://api.distribuidoracandelaria2014ops.com/mcp",
+        transport: "streamable-http",
+        requestTimeoutMs: 20000,
+        connectionTimeoutMs: 5000,
+        headers: { Authorization: "Bearer ${CANDELARIA_BACKEND_TOKEN}" },
+        toolFilter: { include: ["list_queue", "approve_decision", "reorder_queue", "revoke_decision"] },
+      },
+    },
+  },
+}

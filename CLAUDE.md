@@ -40,9 +40,16 @@ reviews/approves.
   with clearly separated internal modules. Budget and team size (one
   owner, one developer) don't justify microservice overhead yet.
 - **Strict separation between orchestration and logic:**
-  - **OpenClaw** (separate system, not part of this repo) owns: Telegram
-    conversation, receiving file uploads, relaying commands, calling this
-    backend as tools, formatting results in plain language.
+  - **OpenClaw** (its own top-level directory in this repo, `openclaw/`
+    — brought in 2026-10-09; previously described here as "a separate
+    system, not part of this repo," which the project owner explicitly
+    reversed, so update this note rather than the old one if that ever
+    changes again) owns: Telegram conversation, receiving file uploads,
+    relaying commands, calling this backend as tools, formatting
+    results in plain language. Deployed as its own container/service,
+    not merged into the backend's own process — the separation is
+    architectural (own image, own config, own agent instructions), not
+    about which git repo the code lives in.
   - **This backend** owns everything else: file parsing, normalization,
     matching, all financial math, rule evaluation, database writes,
     retries, audit logging. OpenClaw must never contain business logic —
@@ -166,6 +173,63 @@ owner must be able to see *why*, not just the label.
 - Never hardcode credentials, ever, anywhere — always AWS Secrets Manager.
 - This system's outputs directly drive real purchase decisions —
   correctness and explainability matter more than speed of delivery.
+
+---
+
+## Current status (updated 2026-10-09 — OpenClaw brought into this repo)
+
+**Explicit reversal of this file's own prior architecture note, at the
+project owner's direction:** OpenClaw now lives in this repo, under
+`openclaw/` - scaffold only (`config/openclaw.json5`,
+`workspace/AGENTS.md`, `Dockerfile`, `README.md`, `.gitignore`), no
+infrastructure yet. The owning-separation principle itself (OpenClaw
+never contains business logic) is unchanged; only "which git repo"
+changed.
+
+**Everything in the scaffold is grounded in actually running the real
+image, not copied from the planning docs' assumptions** - pulled and
+ran `ghcr.io/openclaw/openclaw:2026.9.9` locally (confirmed as a real,
+pullable, explicit version tag, not inferred from `:latest`). Two real
+corrections to `docs/openclaw/OPENCLAW_DEPLOYMENT_PLAN.md`'s own
+assumptions, found by testing rather than assumed:
+1. The image's entrypoint already runs `openclaw doctor --fix
+   --non-interactive` on every start and auto-generates a default
+   config if none exists - but that default is missing `gateway.mode`,
+   and the Gateway then refuses to start ("Gateway start blocked...").
+   The deployment plan's custom-bootstrap-entrypoint idea turned out to
+   be unnecessary; the real fix is simpler: seed a valid config (with
+   `gateway.mode` set) onto the persistent volume before first boot,
+   and the image's own repair logic leaves it alone from then on.
+2. `/healthz`/`/startupz`/`/readyz` all confirmed live and working
+   exactly as documented - but only reachable from *inside* the
+   container's own network namespace (`gateway.bind: "loopback"`), not
+   via a host port mapping - confirms the "no ALB, no public listener"
+   design is correct, and gives a verified, ready-to-use ECS health
+   check command (`curl -f http://127.0.0.1:18789/healthz`, `curl` is
+   present in the image).
+
+Also resolved via `openclaw config schema` (not guessed): the exact
+config paths for the agent's model (`agents.entries.main.model`,
+confirmed format `anthropic/claude-sonnet-5`) and provider API key
+(`models.providers.anthropic.apiKey`), and confirmed
+`channels.telegram.allowFrom` is a real schema key matching
+`OPENCLAW_TECHNICAL_SPEC.md`'s recommendation.
+
+`revoke_decision` (built earlier this same session, see the entry
+below) is included in the scaffold's `mcp.servers.candelaria_backend.toolFilter.include`
+and `workspace/AGENTS.md`'s tool list - both spec docs
+(`OPENCLAW_TECHNICAL_SPEC.md`, `OPENCLAW_DEPLOYMENT_PLAN.md`) and the
+scaffold itself are consistent on all four tools now.
+
+**Still entirely open:** no EFS volume, ECS task definition, or ECS
+service exists for this - `infra/` has nothing OpenClaw-specific yet.
+`ANTHROPIC_API_KEY` still needs provisioning (+ a spend limit in the
+Anthropic Console - both are the project owner's own action, not
+something done from this repo). Telegram user IDs for
+`allowFrom` are still uncollected. No stub MCP server exists for the
+safer stub-first pairing/testing sequence the deployment plan
+recommends - `config/openclaw.json5` currently points straight at the
+real production backend.
 
 ---
 
