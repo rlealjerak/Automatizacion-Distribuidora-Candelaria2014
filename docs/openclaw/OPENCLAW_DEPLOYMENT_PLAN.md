@@ -146,7 +146,7 @@ Combining the security-hardened baseline from the docs with everything decided e
         requestTimeoutMs: 20000,
         connectionTimeoutMs: 5000,
         headers: { Authorization: "Bearer ${CANDELARIA_BACKEND_TOKEN}" },
-        toolFilter: { include: ["list_queue", "approve_decision", "reorder_queue"] },
+        toolFilter: { include: ["list_queue", "approve_decision", "reorder_queue", "revoke_decision"] },
       },
     },
   },

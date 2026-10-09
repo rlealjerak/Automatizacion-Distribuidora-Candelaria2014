@@ -147,6 +147,13 @@ class RejectMatchRequest(BaseModel):
     confirmed_by: str
 
 
+class RevokeApprovalRequest(BaseModel):
+    # Required per the 2026-10-08 revoke-path spec - revoking is for
+    # Rob's test misfires and genuine mistakes, never a silent action.
+    reason: str
+    revoked_by: str
+
+
 class MatchOut(BaseModel):
     id: uuid.UUID
     supplier_item_number: str

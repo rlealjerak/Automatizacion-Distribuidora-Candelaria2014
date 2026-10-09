@@ -1,9 +1,15 @@
 """
-MCP-facing tool surface for OpenClaw - the three tools
+MCP-facing tool surface for OpenClaw - the four tools
 docs/openclaw/OPENCLAW_TECHNICAL_SPEC.md Section 4 specifies
-(list_queue/approve_decision/reorder_queue), backed by
+(list_queue/approve_decision/reorder_queue/revoke_decision), backed by
 modules/approvals/service.py. Mounted under /mcp in main.py, wrapped in
 modules/mcp_server/auth.py's bearer-token middleware.
+
+`revoke_decision` (added 2026-10-09) is the Telegram-facing half of the
+2026-10-08 "approvals must be reversible" decision - the admin REST
+endpoint (POST /approvals/{id}/revoke, modules/tools/router.py) is the
+other half, for Rob's own test misfires. The spec originally marked this
+tool "optional, pending Rob's confirmation" - confirmed, built.
 
 Uses the official `mcp` Python SDK. Built against mcp 2.x, where the
 high-level server class was renamed FastMCP -> MCPServer and
@@ -51,6 +57,9 @@ from adc_backend.modules.approvals.service import (
 )
 from adc_backend.modules.approvals.service import (
     reorder_queue as reorder_queue_service,
+)
+from adc_backend.modules.approvals.service import (
+    revoke_decision as revoke_decision_service,
 )
 
 logger = logging.getLogger(__name__)
@@ -141,6 +150,31 @@ def reorder_queue(approval_id: str) -> dict:
         except ApprovalsServiceError as e:
             return {"ok": False, "error": str(e)}
         return {"ok": True, "approval_id": str(item.id), "new_queue_position": item.queue_position}
+
+
+@mcp_server.tool()
+def revoke_decision(approval_id: str, reason: str) -> dict:
+    """
+    Reverses a previously-approved item back into pending/queued - only
+    ever an APPROVED item, never any other state - and the original
+    approval is never erased (see
+    modules/approvals/service.py::revoke_decision's docstring for the
+    full state-machine reasoning, including why "reappears in
+    list_queue" doesn't always mean the literal status "pending").
+
+    `reason` is required, same as the admin REST endpoint - an
+    append-only audit row records who/when/why for every call here too,
+    including a rejected one (e.g. the item was never approved, or was
+    already revoked). No per-Telegram-user attribution is threaded
+    through MCP yet (see CLAUDE.md's open item on collecting Telegram
+    user IDs), so every call here is attributed to "openclaw-telegram-client"
+    in the audit trail rather than a specific person.
+    """
+    with _db_session() as db:
+        result = revoke_decision_service(db, approval_id, reason=reason, revoked_by="openclaw-telegram-client")
+        if not result.ok:
+            return {"ok": False, "error": result.error}
+        return {"ok": True, "approval_id": result.approval_id, "new_status": result.new_status}
 
 
 def build_mcp_asgi_app() -> Starlette:

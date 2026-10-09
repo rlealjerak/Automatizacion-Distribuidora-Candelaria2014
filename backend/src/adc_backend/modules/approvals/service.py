@@ -18,12 +18,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from adc_backend.db.core_models import ListRun, Supplier
 from adc_backend.modules.amazon.models import AmazonDataSnapshot
 from adc_backend.modules.approvals.models import (
+    ApprovalAuditEvent,
+    ApprovalAuditLog,
     ApprovalItemType,
     ApprovalQueue,
     ApprovalResolution,
@@ -57,6 +59,51 @@ class ResolveResult:
     next_active_item: ApprovalQueue | None = None
     error: str | None = None
     active_approval_id: str | None = None
+
+
+@dataclass
+class RevokeResult:
+    ok: bool
+    approval_id: str | None = None
+    new_status: str | None = None
+    error: str | None = None
+    # "invalid_id" | "not_found" | "not_approved" - lets callers (the
+    # REST router) map to a sensible HTTP status without string-sniffing
+    # `error`.
+    error_kind: str | None = None
+
+
+def _log_audit_event(
+    db: Session,
+    *,
+    approval_id: uuid.UUID | None,
+    requested_approval_id: str,
+    action: str,
+    event: ApprovalAuditEvent,
+    ok: bool,
+    actor: str | None,
+    note: str | None = None,
+    error: str | None = None,
+) -> None:
+    """
+    Every call into resolve_active_item/revoke_decision logs exactly one
+    of these, success or not - append-only, see ApprovalAuditLog's
+    docstring. Never raises on its own account; a logging bug must never
+    be what breaks an approve/deny/revoke call.
+    """
+    db.add(
+        ApprovalAuditLog(
+            approval_id=approval_id,
+            requested_approval_id=requested_approval_id,
+            action=action,
+            event=event,
+            ok=ok,
+            actor=actor,
+            note=note,
+            error=error,
+        )
+    )
+    db.flush()
 
 
 def _get_active_item(db: Session) -> ApprovalQueue | None:
@@ -253,7 +300,9 @@ def _advance_queue(db: Session) -> ApprovalQueue | None:
     return next_item
 
 
-def resolve_active_item(db: Session, approval_id: str, resolution: str, note: str | None = None) -> ResolveResult:
+def resolve_active_item(
+    db: Session, approval_id: str, resolution: str, note: str | None = None, actor: str = "openclaw-mcp"
+) -> ResolveResult:
     """
     Resolves the active item only - the server-side backstop for the
     one-active-item model (OPENCLAW_TECHNICAL_SPEC.md Section 4.2): a
@@ -269,10 +318,19 @@ def resolve_active_item(db: Session, approval_id: str, resolution: str, note: st
     silently overwrite - "no financially consequential action ever
     executes automatically" extends to never letting an ambiguous retry
     flip a decision that's already been made.
+
+    Every return path logs exactly one ApprovalAuditLog row, success or
+    not - "audit-log every call, including rejected ones" per the
+    2026-10-08 owner decision alongside the revoke path below.
     """
     approval_uuid = _parse_approval_id(approval_id)
     if approval_uuid is None:
-        return ResolveResult(ok=False, error=f"approval_id {approval_id!r} is not a valid id", active_approval_id=_active_id_str(db))
+        error = f"approval_id {approval_id!r} is not a valid id"
+        _log_audit_event(
+            db, approval_id=None, requested_approval_id=approval_id, action="resolve",
+            event=ApprovalAuditEvent.REJECTED, ok=False, actor=actor, note=note, error=error,
+        )
+        return ResolveResult(ok=False, error=error, active_approval_id=_active_id_str(db))
 
     item = db.get(ApprovalQueue, approval_uuid)
     active = _get_active_item(db)
@@ -281,7 +339,12 @@ def resolve_active_item(db: Session, approval_id: str, resolution: str, note: st
         try:
             resolution_enum = ApprovalResolution(resolution)
         except ValueError:
-            return ResolveResult(ok=False, error=f"resolution {resolution!r} must be 'approved' or 'denied'", active_approval_id=str(active.id))
+            error = f"resolution {resolution!r} must be 'approved' or 'denied'"
+            _log_audit_event(
+                db, approval_id=item.id, requested_approval_id=approval_id, action="resolve",
+                event=ApprovalAuditEvent.REJECTED, ok=False, actor=actor, note=note, error=error,
+            )
+            return ResolveResult(ok=False, error=error, active_approval_id=str(active.id))
         item.resolution = resolution_enum
         item.resolved_at = datetime.now(UTC)
         item.resolution_note = note
@@ -297,6 +360,11 @@ def resolve_active_item(db: Session, approval_id: str, resolution: str, note: st
         db.flush()
         next_item = _advance_queue(db)
         db.flush()
+        _log_audit_event(
+            db, approval_id=item.id, requested_approval_id=approval_id, action="resolve",
+            event=ApprovalAuditEvent.APPROVED if resolution_enum == ApprovalResolution.APPROVED else ApprovalAuditEvent.DENIED,
+            ok=True, actor=actor, note=note,
+        )
         return ResolveResult(
             ok=True,
             approval_id=str(item.id),
@@ -307,6 +375,13 @@ def resolve_active_item(db: Session, approval_id: str, resolution: str, note: st
 
     if item is not None and item.resolution is not None:
         if item.resolution.value == resolution:
+            # Idempotent replay - still logged (it's a real call that
+            # happened), just doesn't re-apply anything.
+            _log_audit_event(
+                db, approval_id=item.id, requested_approval_id=approval_id, action="resolve",
+                event=ApprovalAuditEvent.APPROVED if item.resolution == ApprovalResolution.APPROVED else ApprovalAuditEvent.DENIED,
+                ok=True, actor=actor, note=note,
+            )
             return ResolveResult(
                 ok=True,
                 approval_id=str(item.id),
@@ -314,13 +389,116 @@ def resolve_active_item(db: Session, approval_id: str, resolution: str, note: st
                 resolved_at=item.resolved_at,
                 next_active_item=_get_active_item(db),
             )
-        return ResolveResult(
-            ok=False,
-            error=f"approval_id {approval_id} was already resolved as {item.resolution.value!r}, cannot resolve as {resolution!r}",
-            active_approval_id=_active_id_str(db),
+        error = f"approval_id {approval_id} was already resolved as {item.resolution.value!r}, cannot resolve as {resolution!r}"
+        _log_audit_event(
+            db, approval_id=item.id, requested_approval_id=approval_id, action="resolve",
+            event=ApprovalAuditEvent.REJECTED, ok=False, actor=actor, note=note, error=error,
         )
+        return ResolveResult(ok=False, error=error, active_approval_id=_active_id_str(db))
 
-    return ResolveResult(ok=False, error=f"approval_id {approval_id} is not the active item", active_approval_id=_active_id_str(db))
+    error = f"approval_id {approval_id} is not the active item"
+    _log_audit_event(
+        db, approval_id=item.id if item is not None else None, requested_approval_id=approval_id, action="resolve",
+        event=ApprovalAuditEvent.REJECTED, ok=False, actor=actor, note=note, error=error,
+    )
+    return ResolveResult(ok=False, error=error, active_approval_id=_active_id_str(db))
+
+
+def revoke_decision(db: Session, approval_id: str, reason: str, revoked_by: str) -> RevokeResult:
+    """
+    Reverses an APPROVED item back into the queue - approved -> * only,
+    never any other starting state. Decided 2026-10-08: approvals must
+    be reversible (Rob's own test misfires against prod, or a genuine
+    mistaken approval) - but the approval being reversed is never
+    erased, only ever superseded by a new `approval_revoked`
+    ApprovalAuditLog row sitting permanently next to the original
+    `approved` one (see that model's docstring).
+
+    Race-safety: the approved->* transition is a single conditional
+    UPDATE ... WHERE status = 'approved', not a Python
+    read-then-compare-then-write - two concurrent revoke calls against
+    the same row can only ever have one succeed; the second's WHERE
+    clause simply matches zero rows once the first has committed, no
+    explicit locking needed.
+
+    One-active-item complication the original request's literal wording
+    ("approved -> pending") didn't fully account for: by the time an
+    item reaches APPROVED, _advance_queue() has already promoted
+    whatever was next in line to be the new active/pending item, so
+    writing this item straight back to PENDING would collide with
+    uq_approval_queue_one_active_item (two rows both claiming to be
+    "the" active item). Resolution, flagged here rather than silently
+    assumed: if nothing is currently active (the queue had emptied),
+    this item becomes the active/pending item again, with a fresh timer
+    - otherwise it goes to the FRONT of the queue (queue_position=1)
+    instead of force-evicting whatever the client is currently looking
+    at. Either way it "reappears in list_queue" per the spec, and no
+    reminder fires as a side effect of the revoke itself - reminders
+    only resume if/when this item is later promoted back to active
+    through the ordinary _advance_queue flow, same as any other queued
+    item ("reminders do not restart automatically").
+
+    --- FUTURE GUARD (not yet applicable - nothing to check against) ---
+    Once Priority 2 introduces purchase-order drafts generated from
+    approvals, add a check HERE, before the conditional UPDATE below:
+    refuse the revoke outright if a PO draft already exists/was sent for
+    this approval_id. No such table exists anywhere in this schema yet,
+    so nothing is stubbed - this comment is the marker for whoever
+    builds that phase.
+    """
+    approval_uuid = _parse_approval_id(approval_id)
+    if approval_uuid is None:
+        error = f"approval_id {approval_id!r} is not a valid id"
+        _log_audit_event(
+            db, approval_id=None, requested_approval_id=approval_id, action="revoke",
+            event=ApprovalAuditEvent.REJECTED, ok=False, actor=revoked_by, note=reason, error=error,
+        )
+        return RevokeResult(ok=False, error=error, error_kind="invalid_id")
+
+    result = db.execute(
+        update(ApprovalQueue)
+        .where(ApprovalQueue.id == approval_uuid, ApprovalQueue.status == ApprovalStatus.APPROVED)
+        .values(resolution=None, resolved_at=None, resolution_note=None)
+    )
+    if result.rowcount == 0:
+        existing = db.get(ApprovalQueue, approval_uuid)
+        if existing is None:
+            error = f"approval_id {approval_id} does not exist"
+            error_kind = "not_found"
+        else:
+            error = f"approval_id {approval_id} is not approved (current status: {existing.status.value!r}) - only approved items can be revoked"
+            error_kind = "not_approved"
+        _log_audit_event(
+            db, approval_id=existing.id if existing else None, requested_approval_id=approval_id, action="revoke",
+            event=ApprovalAuditEvent.REJECTED, ok=False, actor=revoked_by, note=reason, error=error,
+        )
+        return RevokeResult(ok=False, error=error, error_kind=error_kind)
+
+    db.flush()
+    item = db.get(ApprovalQueue, approval_uuid)
+
+    active = _get_active_item(db)
+    if active is None:
+        item.status = ApprovalStatus.PENDING
+        item.is_active_item = True
+        item.pending_started_at = datetime.now(UTC)
+        item.last_reminder_at = None
+        item.reminder_count = 0
+        item.queue_position = None
+    else:
+        queued = _get_queued_items_ordered(db)
+        for existing_q in queued:
+            existing_q.queue_position += 1
+        item.status = ApprovalStatus.QUEUED
+        item.is_active_item = False
+        item.queue_position = 1
+
+    db.flush()
+    _log_audit_event(
+        db, approval_id=item.id, requested_approval_id=approval_id, action="revoke",
+        event=ApprovalAuditEvent.REVOKED, ok=True, actor=revoked_by, note=reason,
+    )
+    return RevokeResult(ok=True, approval_id=str(item.id), new_status=item.status.value)
 
 
 def reorder_queue(db: Session, approval_id: str) -> ApprovalQueue:

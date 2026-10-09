@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 from adc_backend.config import get_settings, get_sqs_client
 from adc_backend.db.base import get_db
 from adc_backend.db.core_models import ListRun, Supplier
+from adc_backend.modules.approvals.service import revoke_decision
 from adc_backend.modules.ingestion.models import RawLineItem
 from adc_backend.modules.ingestion.service import IngestionError, ingest_file
 from adc_backend.modules.matching.engine import confirm_match, reject_match
@@ -56,6 +57,7 @@ from adc_backend.modules.tools.schemas import (
     ProposedMappingOut,
     RejectMatchRequest,
     ResolveReviewRequest,
+    RevokeApprovalRequest,
     RunComparisonOut,
     RunComparisonRow,
     RunResultsOut,
@@ -305,3 +307,29 @@ def reject_match_endpoint(match_id: uuid.UUID, body: RejectMatchRequest, db: Ses
         raise HTTPException(status_code=404, detail=str(e)) from e
     db.commit()
     return match
+
+
+# --- approval revoke (admin-only, behind X-Api-Key - decided 2026-10-08) ---
+# Deliberately a plain string path param, not uuid.UUID: a malformed id
+# still needs to reach revoke_decision so it gets audit-logged as a
+# rejected call, rather than FastAPI short-circuiting it into an
+# unlogged 422 before the service layer ever sees it.
+_REVOKE_ERROR_STATUS = {"invalid_id": 422, "not_found": 404, "not_approved": 409}
+
+
+@router.post("/approvals/{approval_id}/revoke")
+def revoke_approval_endpoint(approval_id: str, body: RevokeApprovalRequest, db: Session = Depends(get_db)):
+    result = revoke_decision(db, approval_id, reason=body.reason, revoked_by=body.revoked_by)
+    # Commit either way, even on rejection - revoke_decision() never
+    # mutates ApprovalQueue state on a rejected call (its conditional
+    # UPDATE only ever matches the row it's allowed to change), so the
+    # only pending write on that path is the audit log row, which must
+    # survive. A db.rollback() here would silently undo the very
+    # "audit-log every call, including rejected ones" guarantee this
+    # endpoint exists to provide - found by actually testing the
+    # rejection paths end-to-end, not assumed.
+    db.commit()
+    if not result.ok:
+        status_code = _REVOKE_ERROR_STATUS.get(result.error_kind, 400)
+        raise HTTPException(status_code=status_code, detail=result.error)
+    return {"approval_id": result.approval_id, "status": result.new_status}
