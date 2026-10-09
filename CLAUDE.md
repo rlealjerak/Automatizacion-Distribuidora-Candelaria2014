@@ -169,6 +169,79 @@ owner must be able to see *why*, not just the label.
 
 ---
 
+## Current status (updated 2026-10-08 — audited revoke path for approvals)
+
+**Built the full audited revoke path per the 2026-10-08 decision
+("approvals must be reversible") - branch
+`feat/approval-revoke-path`, not yet merged.** New `approval_audit_log`
+table (`modules/approvals/models.py::ApprovalAuditLog`, migration
+`0b21449f1923`) - append-only, every `resolve_active_item` call now logs
+exactly one row (success or rejected), closing the one gap in "confirm
+`approve_decision` rejects non-pending IDs, is idempotent, and
+audit-logs every call" - the first two were already true and tested;
+audit-logging was the missing piece. New `revoke_decision()` in
+`modules/approvals/service.py`: a conditional `UPDATE ... WHERE status
+= 'approved'` (race-safe without explicit locking - a concurrent second
+call simply matches zero rows once the first commits), backed by a new
+admin REST endpoint (`POST /approvals/{id}/revoke`, behind the existing
+`X-Api-Key`, `reason` + `revoked_by` required in the body).
+
+**One real design gap in the original spec, resolved and flagged, not
+guessed past:** the spec's literal wording ("approved → pending") didn't
+account for the one-active-item model - by the time an item is
+`APPROVED`, `_advance_queue()` has already promoted the next item to
+`PENDING`/active, so writing the revoked item straight back to
+`PENDING` would collide with `uq_approval_queue_one_active_item`.
+Resolved as: if nothing is currently active, the revoked item becomes
+active/pending again with a fresh timer; otherwise it goes to the front
+of the queue (`queue_position=1`) instead of force-evicting whatever the
+client is currently looking at. Either way it "reappears in
+`list_queue`," and reminders never restart as a side effect of the
+revoke itself - matches the spec's intent, just not its exact literal
+status name in the one-active-item-already-occupied case.
+
+**One real bug caught by actually testing the rejection paths through
+the real HTTP router, not just the service layer:** the router's
+`db.rollback()` on a rejected revoke call was silently wiping out the
+very audit-log row the rejection was supposed to produce, since both
+were written in the same uncommitted transaction. Fixed by always
+committing in that endpoint (`revoke_decision()` never leaves partial
+`ApprovalQueue` mutations behind on a rejected call, so this is safe) -
+caught by `test_api_integration.py::test_revoke_approval_endpoint_end_to_end`
+failing on the audit-trail assertion, not assumed to be fine because the
+service-layer tests passed.
+
+**Deliberately not built: the `revoke_decision` MCP tool** (the spec
+marked this "optional, pending Rob's confirmation" - i.e. the project
+owner's own confirmation). Only the admin REST endpoint exists so far;
+revoking from Telegram isn't possible yet.
+
+**Future guard left as a comment, not a stub:** once Priority 2 creates
+purchase-order drafts from approvals, `revoke_decision()` must refuse a
+revoke if a draft was already sent - no such table exists yet, so
+nothing is checked against today; the comment marking exactly where
+this goes lives directly above the conditional `UPDATE` in
+`revoke_decision()`.
+
+157/157 tests pass (146 prior + 11 new), migration
+`upgrade → downgrade → upgrade` cycle verified against local Postgres.
+**Not yet applied anywhere** - this branch hasn't been merged or
+deployed; the real `adc-prod-db` has no `approval_audit_log` table yet.
+
+**Explicitly out of scope for this backend repo, flagged back to the
+user rather than attempted:** collecting the client's and the owner's
+numeric Telegram user IDs (needs the owner to actually message
+OpenClaw's bot - no path to do this from here); storing a real Anthropic
+API key in Secrets Manager and setting a spend limit in the Anthropic
+Console (the spend limit specifically is a console action only the
+account holder can take; the secret value itself was never provided to
+paste into a transcript); and creating the OpenClaw repo itself
+(`config/openclaw.json5`, `workspace/AGENTS.md`, etc.) - a separate
+codebase per this file's own architecture section, not something to
+scaffold inside this repo without the user saying where it should live.
+
+---
+
 ## Current status (updated 2026-10-05 — Goal 2/TLS live, OpenClaw secrets closed out)
 
 **Both items blocking OpenClaw integration going into this session are
