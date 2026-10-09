@@ -55,9 +55,9 @@ variable "db_username" {
 }
 
 variable "db_deletion_protection" {
-  description = "Set true before this holds data anyone would be upset to lose. Default false so MVP infra is easy to tear down / rebuild while iterating."
+  description = "True since 2026-10 - real supplier/pricing data now lives here (approval queue, classification history) that nobody has a recovery path for otherwise."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "db_skip_final_snapshot" {
