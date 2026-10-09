@@ -1,0 +1,21 @@
+# OpenClaw's own guidance (seen live in its doctor output on first run,
+# 2026-10-09): "back up the agent workspace in a private git repo; keep
+# ~/.openclaw out of git (credentials, sessions)." The real runtime
+# config/state directory never lives in this repo at all (it's on a
+# persistent EFS volume in production, see README.md) - these entries
+# are for anyone who runs the container locally against a bind-mounted
+# directory for testing.
+.openclaw/
+*.sqlite
+*.sqlite-journal
+.env
+.env.*
+!.env.example
+
+# Local test volumes if you mount one at this path when running
+# `docker run -v` locally, per README.md's dry-run instructions.
+local-state/
+
+# Standard OS/editor noise.
+.DS_Store
+*.log
