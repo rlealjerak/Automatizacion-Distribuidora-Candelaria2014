@@ -57,6 +57,16 @@ class ApprovalResolution(str, enum.Enum):
     DENIED = "denied"
 
 
+class ApprovalAuditEvent(str, enum.Enum):
+    APPROVED = "approved"
+    DENIED = "denied"
+    REVOKED = "approval_revoked"
+    # A call that didn't apply at all - bad/unknown id, wrong state,
+    # conflicting replay. Logged same as any other event: the point of
+    # this table is what was *attempted*, not just what succeeded.
+    REJECTED = "rejected"
+
+
 class ApprovalQueue(Base):
     """
     One row per approval-requiring recommendation. Only one row at a time
@@ -131,3 +141,48 @@ class ApprovalQueue(Base):
     # True only for the single currently-active item (pending/reminder_N/
     # holding) - see __table_args__ above. False for queued/terminal rows.
     is_active_item: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
+
+
+class ApprovalAuditLog(Base):
+    """
+    Append-only audit trail for every approve/deny/revoke call against
+    approval_queue - rows here are NEVER updated or deleted, only ever
+    inserted (see modules/approvals/service.py::_log_audit_event). Exists
+    specifically so a revoke's `approval_revoked` event sits permanently
+    next to the original `approved` event it reverses, per explicit
+    owner decision (2026-10-08, revoke-path spec): approvals must be
+    reversible, and the history of a reversal must be provable, not
+    just inferable from the current row state.
+
+    `approval_queue.resolution`/`resolved_at` still hold the *current*
+    resolution for fast reads and existing idempotency logic; this table
+    is the full history, including calls that were rejected outright
+    (bad id, wrong state, conflicting replay) - "audit-log every call,
+    including rejected ones" per the same owner decision.
+    """
+
+    __tablename__ = "approval_audit_log"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+
+    # Deliberately nullable, no FK: a rejected call against a bad/unknown
+    # id still gets logged, and may not correspond to any real row.
+    approval_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+
+    # The raw caller-supplied id string, always recorded verbatim even
+    # when it never parsed as a UUID at all - this table's whole point
+    # is knowing what was *attempted*, not only what succeeded.
+    requested_approval_id: Mapped[str | None] = mapped_column(Text)
+
+    action: Mapped[str] = mapped_column(Text, nullable=False)  # "resolve" | "revoke"
+    event: Mapped[ApprovalAuditEvent] = mapped_column(Enum(ApprovalAuditEvent, name="approval_audit_event"), nullable=False)
+    ok: Mapped[bool] = mapped_column(Boolean, nullable=False)
+
+    # Caller identity - "openclaw-mcp" for every approve/deny call today
+    # (no per-Telegram-user attribution is threaded through MCP yet), or
+    # whoever the admin revoke endpoint's caller says they are.
+    actor: Mapped[str | None] = mapped_column(Text)
+    note: Mapped[str | None] = mapped_column(Text)  # resolution note / revoke reason
+    error: Mapped[str | None] = mapped_column(Text)  # populated when ok=False
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

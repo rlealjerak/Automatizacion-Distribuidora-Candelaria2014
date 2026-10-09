@@ -240,3 +240,195 @@ def test_reorder_queue_rejects_non_queued_item(db_session, supplier):
     active = create_from_classification(db_session, _make_result(db_session, supplier.id, ClassificationLabel.BUY).id)
     with pytest.raises(ApprovalsServiceError):
         reorder_queue(db_session, str(active.id))
+
+
+# --- audit log (2026-10-08 decision: audit-log every approve_decision call, including rejected ones) ---
+
+
+def test_resolve_active_item_logs_approved_event(db_session, supplier):
+    from sqlalchemy import select
+
+    from adc_backend.modules.approvals.models import ApprovalAuditLog
+    from adc_backend.modules.approvals.service import (
+        create_from_classification,
+        resolve_active_item,
+    )
+    from adc_backend.modules.rules.models import ClassificationLabel
+
+    active = create_from_classification(db_session, _make_result(db_session, supplier.id, ClassificationLabel.BUY).id)
+    resolve_active_item(db_session, str(active.id), "approved", note="go ahead", actor="openclaw-mcp")
+
+    log = db_session.execute(select(ApprovalAuditLog).where(ApprovalAuditLog.approval_id == active.id)).scalar_one()
+    assert log.ok is True
+    assert log.event.value == "approved"
+    assert log.action == "resolve"
+    assert log.actor == "openclaw-mcp"
+    assert log.note == "go ahead"
+
+
+def test_resolve_active_item_logs_rejected_call_for_wrong_id(db_session, supplier):
+    from sqlalchemy import select
+
+    from adc_backend.modules.approvals.models import ApprovalAuditLog
+    from adc_backend.modules.approvals.service import (
+        create_from_classification,
+        resolve_active_item,
+    )
+    from adc_backend.modules.rules.models import ClassificationLabel
+
+    create_from_classification(db_session, _make_result(db_session, supplier.id, ClassificationLabel.BUY).id)  # active
+    queued = create_from_classification(db_session, _make_result(db_session, supplier.id, ClassificationLabel.BUY).id)
+
+    resolve_active_item(db_session, str(queued.id), "approved")
+
+    log = db_session.execute(
+        select(ApprovalAuditLog).where(ApprovalAuditLog.requested_approval_id == str(queued.id))
+    ).scalar_one()
+    assert log.ok is False
+    assert log.event.value == "rejected"
+    assert log.action == "resolve"
+
+
+def test_resolve_active_item_logs_rejected_call_for_invalid_id(db_session):
+    from sqlalchemy import select
+
+    from adc_backend.modules.approvals.models import ApprovalAuditLog
+    from adc_backend.modules.approvals.service import resolve_active_item
+
+    resolve_active_item(db_session, "not-a-uuid", "approved")
+
+    log = db_session.execute(
+        select(ApprovalAuditLog).where(ApprovalAuditLog.requested_approval_id == "not-a-uuid")
+    ).scalar_one()
+    assert log.ok is False
+    assert log.approval_id is None
+    assert log.event.value == "rejected"
+
+
+# --- revoke_decision (2026-10-08 decision: approvals must be reversible) ---
+
+
+def test_revoke_decision_becomes_active_again_when_queue_empty(db_session, supplier):
+    from adc_backend.modules.approvals.models import ApprovalStatus
+    from adc_backend.modules.approvals.service import (
+        create_from_classification,
+        resolve_active_item,
+        revoke_decision,
+    )
+    from adc_backend.modules.rules.models import ClassificationLabel
+
+    only = create_from_classification(db_session, _make_result(db_session, supplier.id, ClassificationLabel.BUY).id)
+    resolve_active_item(db_session, str(only.id), "approved")  # queue now fully empty
+
+    out = revoke_decision(db_session, str(only.id), reason="wrong tap", revoked_by="rob")
+    assert out.ok is True
+    assert out.new_status == "pending"
+
+    db_session.refresh(only)
+    assert only.status == ApprovalStatus.PENDING
+    assert only.is_active_item is True
+    assert only.pending_started_at is not None
+    assert only.reminder_count == 0
+    assert only.last_reminder_at is None
+    assert only.resolution is None
+    assert only.resolved_at is None
+
+
+def test_revoke_decision_inserts_at_front_of_queue_when_another_item_active(db_session, supplier):
+    from adc_backend.modules.approvals.models import ApprovalStatus
+    from adc_backend.modules.approvals.service import (
+        create_from_classification,
+        resolve_active_item,
+        revoke_decision,
+    )
+    from adc_backend.modules.rules.models import ClassificationLabel
+
+    first = create_from_classification(db_session, _make_result(db_session, supplier.id, ClassificationLabel.BUY).id)
+    second = create_from_classification(db_session, _make_result(db_session, supplier.id, ClassificationLabel.BUY).id)
+    resolve_active_item(db_session, str(first.id), "approved")  # second now active
+    third = create_from_classification(db_session, _make_result(db_session, supplier.id, ClassificationLabel.BUY).id)  # queued, position 1
+
+    out = revoke_decision(db_session, str(first.id), reason="test misfire", revoked_by="rob")
+    assert out.ok is True
+    assert out.new_status == "queued"
+
+    db_session.refresh(first)
+    db_session.refresh(second)
+    db_session.refresh(third)
+
+    assert first.status == ApprovalStatus.QUEUED
+    assert first.is_active_item is False
+    assert first.queue_position == 1
+    assert first.resolution is None
+    assert second.is_active_item is True  # untouched - never force-evicted
+    assert third.queue_position == 2  # bumped back behind the revoked item
+
+
+def test_revoke_decision_rejects_pending_item(db_session, supplier):
+    from adc_backend.modules.approvals.service import create_from_classification, revoke_decision
+    from adc_backend.modules.rules.models import ClassificationLabel
+
+    active = create_from_classification(db_session, _make_result(db_session, supplier.id, ClassificationLabel.BUY).id)
+
+    out = revoke_decision(db_session, str(active.id), reason="oops", revoked_by="rob")
+    assert out.ok is False
+    assert out.error_kind == "not_approved"
+
+
+def test_revoke_decision_rejects_second_call(db_session, supplier):
+    from adc_backend.modules.approvals.service import (
+        create_from_classification,
+        resolve_active_item,
+        revoke_decision,
+    )
+    from adc_backend.modules.rules.models import ClassificationLabel
+
+    only = create_from_classification(db_session, _make_result(db_session, supplier.id, ClassificationLabel.BUY).id)
+    resolve_active_item(db_session, str(only.id), "approved")
+
+    first = revoke_decision(db_session, str(only.id), reason="first", revoked_by="rob")
+    second = revoke_decision(db_session, str(only.id), reason="second", revoked_by="rob")
+
+    assert first.ok is True
+    assert second.ok is False
+    assert second.error_kind == "not_approved"
+
+
+def test_revoke_decision_rejects_invalid_id(db_session):
+    from adc_backend.modules.approvals.service import revoke_decision
+
+    out = revoke_decision(db_session, "not-a-uuid", reason="x", revoked_by="rob")
+    assert out.ok is False
+    assert out.error_kind == "invalid_id"
+
+
+def test_revoke_decision_rejects_unknown_id(db_session):
+    from adc_backend.modules.approvals.service import revoke_decision
+
+    out = revoke_decision(db_session, str(uuid.uuid4()), reason="x", revoked_by="rob")
+    assert out.ok is False
+    assert out.error_kind == "not_found"
+
+
+def test_revoke_decision_audit_log_preserves_approved_event_in_order(db_session, supplier):
+    from sqlalchemy import select
+
+    from adc_backend.modules.approvals.models import ApprovalAuditLog
+    from adc_backend.modules.approvals.service import (
+        create_from_classification,
+        resolve_active_item,
+        revoke_decision,
+    )
+    from adc_backend.modules.rules.models import ClassificationLabel
+
+    item = create_from_classification(db_session, _make_result(db_session, supplier.id, ClassificationLabel.BUY).id)
+    resolve_active_item(db_session, str(item.id), "approved", note="first pass looked good")
+    revoke_decision(db_session, str(item.id), reason="misfire", revoked_by="rob")
+
+    events = db_session.execute(
+        select(ApprovalAuditLog).where(ApprovalAuditLog.approval_id == item.id).order_by(ApprovalAuditLog.created_at)
+    ).scalars().all()
+
+    assert [e.event.value for e in events] == ["approved", "approval_revoked"]
+    assert events[0].ok is True and events[0].note == "first pass looked good"
+    assert events[1].ok is True and events[1].note == "misfire" and events[1].actor == "rob"

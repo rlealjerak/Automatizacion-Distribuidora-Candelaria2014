@@ -258,3 +258,79 @@ def test_match_confirm_and_reject_endpoints(client, db_session):
         db_session.query(ProductMatch).filter_by(supplier_id=supplier.id).delete()
         db_session.query(Supplier).filter_by(id=supplier.id).delete()
         db_session.commit()
+
+
+def test_revoke_approval_endpoint_end_to_end(client, db_session):
+    """
+    HTTP-level test for the admin revoke endpoint (2026-10-08 decision) -
+    every other revoke_decision() behavior is covered at the service
+    layer in test_approvals_service.py; this one just confirms the
+    router wiring itself (status codes, request/response shape).
+    """
+    from adc_backend.db.core_models import ListRun, SourceFileType, Supplier
+    from adc_backend.modules.approvals.models import ApprovalAuditLog, ApprovalQueue
+    from adc_backend.modules.approvals.service import (
+        create_from_classification,
+        resolve_active_item,
+    )
+    from adc_backend.modules.ingestion.models import RawLineItem
+    from adc_backend.modules.rules.models import ClassificationLabel, ClassificationResult
+
+    supplier = Supplier(name=f"Seed Supplier {uuid.uuid4()}", code=f"seed-{uuid.uuid4().hex[:8]}")
+    db_session.add(supplier)
+    db_session.flush()
+    run = ListRun(
+        supplier_id=supplier.id,
+        source_file_s3_key="s3://x/y.csv",
+        source_file_original_filename="y.csv",
+        source_file_type=SourceFileType.CSV,
+    )
+    db_session.add(run)
+    db_session.flush()
+    item = RawLineItem(list_run_id=run.id, row_number=1, raw_data={}, unit_price=Decimal(10))
+    db_session.add(item)
+    db_session.flush()
+    result = ClassificationResult(
+        list_run_id=run.id,
+        raw_line_item_id=item.id,
+        classification=ClassificationLabel.BUY,
+        roi=Decimal(50),
+        margin=Decimal(25),
+        rule_trace=[{"rule": "financial_calculation", "result": "info", "reasoning": "seeded", "inputs": {"unit_cost": "10", "sell_price": "20", "profit": "10"}}],
+    )
+    db_session.add(result)
+    db_session.flush()
+    approval = create_from_classification(db_session, result.id)
+    resolve_active_item(db_session, str(approval.id), "approved")
+    db_session.commit()
+
+    try:
+        revoke_resp = client.post(f"/approvals/{approval.id}/revoke", json={"reason": "test", "revoked_by": "rob"})
+        assert revoke_resp.status_code == 200
+        assert revoke_resp.json()["status"] == "pending"
+
+        second_resp = client.post(f"/approvals/{approval.id}/revoke", json={"reason": "again", "revoked_by": "rob"})
+        assert second_resp.status_code == 409
+
+        missing_id = uuid.uuid4()
+        missing_resp = client.post(f"/approvals/{missing_id}/revoke", json={"reason": "x", "revoked_by": "rob"})
+        assert missing_resp.status_code == 404
+
+        invalid_resp = client.post("/approvals/not-a-uuid/revoke", json={"reason": "x", "revoked_by": "rob"})
+        assert invalid_resp.status_code == 422
+
+        events = db_session.query(ApprovalAuditLog).filter_by(approval_id=approval.id).order_by(ApprovalAuditLog.created_at).all()
+        assert [e.event.value for e in events] == ["approved", "approval_revoked", "rejected"]
+    finally:
+        db_session.query(ApprovalAuditLog).filter(
+            ApprovalAuditLog.approval_id == approval.id,
+        ).delete()
+        db_session.query(ApprovalAuditLog).filter(
+            ApprovalAuditLog.requested_approval_id.in_([str(missing_id), "not-a-uuid"]),
+        ).delete()
+        db_session.query(ApprovalQueue).filter_by(id=approval.id).delete()
+        db_session.query(ClassificationResult).filter_by(list_run_id=run.id).delete()
+        db_session.query(RawLineItem).filter_by(list_run_id=run.id).delete()
+        db_session.query(ListRun).filter_by(id=run.id).delete()
+        db_session.query(Supplier).filter_by(id=supplier.id).delete()
+        db_session.commit()
