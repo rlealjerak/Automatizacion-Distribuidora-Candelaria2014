@@ -93,11 +93,13 @@ class TestMcpToolsRoundTrip:
         # silently breaking unrelated tests - found live the hard way
         # (test_approvals_service.py failures traced back to this file's
         # leftover data, not a bug in either file).
-        from adc_backend.modules.approvals.models import ApprovalQueue
+        from adc_backend.modules.approvals.models import ApprovalAuditLog, ApprovalQueue
 
+        db_session.query(ApprovalAuditLog).delete()
         db_session.query(ApprovalQueue).delete()
         db_session.commit()
         yield
+        db_session.query(ApprovalAuditLog).delete()
         db_session.query(ApprovalQueue).delete()
         db_session.commit()
 
@@ -202,3 +204,20 @@ class TestMcpToolsRoundTrip:
         assert response.status_code == 200
         assert result["ok"] is False
         assert "active_approval_id" in result
+
+    def test_revoke_decision_on_approved_item_succeeds(self, client, db_session):
+        item = self._seed_buy_item(db_session)
+        self._call(client, "approve_decision", {"approval_id": str(item.id), "resolution": "approved"})
+
+        response, result = self._call(client, "revoke_decision", {"approval_id": str(item.id), "reason": "client changed their mind"})
+        assert response.status_code == 200
+        assert result["ok"] is True
+        assert result["approval_id"] == str(item.id)
+        assert result["new_status"] == "pending"  # queue was empty, so it becomes active again
+
+    def test_revoke_decision_on_pending_item_returns_error_shape(self, client, db_session):
+        item = self._seed_buy_item(db_session)  # never approved - still pending
+        response, result = self._call(client, "revoke_decision", {"approval_id": str(item.id), "reason": "oops"})
+        assert response.status_code == 200
+        assert result["ok"] is False
+        assert "error" in result
