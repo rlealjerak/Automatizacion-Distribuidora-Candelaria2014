@@ -37,3 +37,11 @@ output "telegram_reminder_secret_arn" {
 output "telegram_reminder_secret_name" {
   value = aws_secretsmanager_secret.telegram_reminder.name
 }
+
+output "openclaw_anthropic_key_secret_arn" {
+  value = aws_secretsmanager_secret.openclaw_anthropic_key.arn
+}
+
+output "openclaw_anthropic_key_secret_name" {
+  value = aws_secretsmanager_secret.openclaw_anthropic_key.name
+}

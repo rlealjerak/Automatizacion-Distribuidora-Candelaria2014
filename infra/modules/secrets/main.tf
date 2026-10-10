@@ -96,3 +96,25 @@ resource "aws_secretsmanager_secret_version" "telegram_reminder" {
     ignore_changes = [secret_string]
   }
 }
+
+# OpenClaw's own model access (not this backend's) - a frontier-tier
+# Claude model is configured deliberately, not a cheaper one, since
+# OpenClaw holds this backend's bearer token and can call
+# approve_decision/revoke_decision (see openclaw/README.md and
+# docs/openclaw/OPENCLAW_DEPLOYMENT_PLAN.md Section 0b). Same
+# {"api_key": ...} shape as the Keepa secret above, for consistency -
+# no ECS task consumes this yet, since OpenClaw's own infrastructure
+# (EFS/task definition/service) doesn't exist in this repo yet either.
+resource "aws_secretsmanager_secret" "openclaw_anthropic_key" {
+  name        = "${var.project_name}/${var.environment}/openclaw-anthropic-key"
+  description = "Anthropic API key for OpenClaw's own agent (not this backend's). Populated manually after apply."
+}
+
+resource "aws_secretsmanager_secret_version" "openclaw_anthropic_key" {
+  secret_id     = aws_secretsmanager_secret.openclaw_anthropic_key.id
+  secret_string = jsonencode({ api_key = "replace-me-via-console-or-cli" })
+
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
+}
