@@ -281,6 +281,12 @@ def classify(inputs: ClassificationInputs, config: dict) -> ClassificationDecisi
                 rule="seller_count_high_risk",
                 result="fail",
                 reasoning=f"{inputs.seller_count} competing sellers is high risk, even though it's not a hard cutoff.",
+                # Added 2026-10-11: this is one of only three rules that
+                # can ever be the *last* trace entry for an approval-gated
+                # (BUY/HIGH_RISK) item - the Spanish "Motivo" template
+                # (modules/rules/reasoning_es.py) needs the real number,
+                # not just the pre-rendered English sentence.
+                inputs={"seller_count": inputs.seller_count},
             )
         )
         return ClassificationDecision(ClassificationLabel.HIGH_RISK, roi_pct, margin_pct, [e.to_dict() for e in trace])

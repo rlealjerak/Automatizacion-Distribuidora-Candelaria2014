@@ -34,6 +34,7 @@ from adc_backend.modules.approvals.models import (
 from adc_backend.modules.ingestion.models import RawLineItem
 from adc_backend.modules.matching.models import ProductMatch
 from adc_backend.modules.rules.models import ClassificationLabel, ClassificationResult
+from adc_backend.modules.rules.reasoning_es import motivo_es
 
 # Labels that create an approval item at all. Per explicit owner decision
 # (2026-08-28) this is BUY *and* HIGH_RISK, not BUY-only as the original
@@ -241,15 +242,21 @@ def create_from_classification(db: Session, classification_result_id: uuid.UUID)
         financials=financials,
         rule_trace=result.rule_trace,
     )
-    # The decisive reasoning is always the LAST rule_trace entry for any
-    # item that reaches this function - engine.py's classify() only
-    # returns BUY/HIGH_RISK by falling through to its final append
+    # The decisive rule is always the LAST rule_trace entry for any item
+    # that reaches this function - engine.py's classify() only returns
+    # BUY/HIGH_RISK by falling through to its final append
     # (sales_velocity for BUY; amazon_has_buy_box/seller_count_high_risk
-    # for HIGH_RISK), so "the last entry's reasoning" is a general rule
-    # here, not a guess at one specific rule name. Confirmed by reading
-    # engine.py directly, 2026-10-11 - used for the Spanish "Motivo:"
-    # line in reminder_job.py.
-    motivo = result.rule_trace[-1].get("reasoning") if result.rule_trace else None
+    # for HIGH_RISK), so "the last entry" is a general rule here, not a
+    # guess at one specific rule name. Confirmed by reading engine.py
+    # directly, 2026-10-11.
+    #
+    # Rendered via a Spanish template keyed by that entry's `rule` code
+    # and filled from its own `inputs` dict - NOT a translation of the
+    # English `reasoning` string after the fact (explicit instruction,
+    # 2026-10-11, after the first version did exactly that and shipped
+    # English text in a Spanish-language message on HIGH_RISK items).
+    # See modules/rules/reasoning_es.py for the full rule-code coverage.
+    motivo = motivo_es(result.rule_trace[-1]) if result.rule_trace else None
 
     case_quantity = line_item.case_quantity if line_item else None
     case_unit = (line_item.case_unit_normalized or line_item.case_unit_raw) if line_item else None

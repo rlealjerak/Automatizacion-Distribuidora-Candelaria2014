@@ -173,6 +173,9 @@ owner must be able to see *why*, not just the label.
 - Never hardcode credentials, ever, anywhere — always AWS Secrets Manager.
 - This system's outputs directly drive real purchase decisions —
   correctness and explainability matter more than speed of delivery.
+- `approval_audit_log` intentionally has no FK to `approval_queue`;
+  audit rows must outlive the rows they describe. Never raw-delete
+  approval rows.
 
 ## Deploy checklist
 
@@ -226,18 +229,31 @@ includes `short_code` too.
 approval: short code instead of the UUID; `/aprobar_<code>` /
 `/rechazar_<code>` (underscore, not a space - Telegram renders
 `/word_with_underscores` as a tappable link, plain text wouldn't be);
-`Motivo:` pulled from `rule_trace[-1]["reasoning"]` (confirmed general,
-not guessed - engine.py's `classify()` only reaches BUY/HIGH_RISK by
-falling through to its final trace append, whichever rule that is);
 units/case pack and capital required (`unit_cost * case_quantity`)
 shown when the data exists; profit explicitly labeled **per unit**
-(confirmed directly from engine.py's math, not assumed). **Known,
-flagged limitation, not silently shipped:** `Motivo` is still in
-English on a HIGH_RISK item, because it's pulled verbatim from
-engine.py's hardcoded English reasoning strings - a real Spanish
-translation would need per-rule templates (the strings carry
-interpolated values), not a simple lookup table, and wasn't built this
-round.
+(confirmed directly from engine.py's math, not assumed).
+
+**UPDATE, same day:** `Motivo`'s English leak (flagged here originally)
+is fixed for real, not translated after the fact - new
+`modules/rules/reasoning_es.py`, one Spanish template per rule *code*
+(engine.py's `rule_trace` was already structured as `{rule, result,
+reasoning, inputs}`, confirmed by reading it - nothing needed to
+change there), filled from that entry's own `inputs` dict. All 13 real
+rule codes templated (`grep -n 'rule="' engine.py`, confirmed count);
+only 3 (`amazon_has_buy_box`, `seller_count_high_risk`,
+`sales_velocity`) can ever actually be the last entry for an item that
+reaches the approval queue at all, traced through every code path, not
+assumed. One real gap fixed in `engine.py` itself while building this:
+`seller_count_high_risk`'s trace entry wasn't passing `seller_count`
+into its own `inputs` dict even though the value was available right
+there - the Spanish template needed a real number, not a guess.
+Percentage formatting (`format_pct_es`: comma decimal, space before
+"%", e.g. `35,0 %`) applied consistently to both the Motivo line and
+the top ROI/Margen summary line, not just where the worked example
+happened to show it. No Spanish-language client brief document exists
+anywhere in this repo (searched directly) - wording is this file's own
+English business-rules table, translated sensibly, not a client-
+approved Spanish source; said so rather than claiming otherwise.
 
 **The immediate "Nueva decisión pendiente" message, built for real.**
 Closes the gap flagged in the 2026-10-10 entry below: new
@@ -275,7 +291,9 @@ them. No audit rows reference them yet (no approve/revoke call has been
 made against them), so this is currently moot, but will matter the
 moment someone acts on them before any cleanup.
 
-170/170 tests pass (159 prior + 11 new), migration
+188/188 tests pass (159 prior + 29 new, including a dedicated
+`test_reasoning_es.py` covering all 13 rule templates individually),
+migration
 `upgrade → downgrade → upgrade` cycle verified locally. **Still open:**
 this branch isn't merged, no image has been built from it, nothing is
 deployed - waiting on review of the three rendered examples (new BUY,

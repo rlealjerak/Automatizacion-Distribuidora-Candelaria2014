@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from adc_backend.db.base import get_sessionmaker
 from adc_backend.modules.approvals.models import ApprovalQueue, ApprovalStatus
 from adc_backend.modules.approvals.service import list_queue
+from adc_backend.modules.rules.reasoning_es import format_pct_es
 from adc_backend.telegram_notifier import TelegramNotifier, TelegramNotifierError
 
 logging.basicConfig(level=logging.INFO)
@@ -89,7 +90,11 @@ def _build_message_text(item: ApprovalQueue, reminder_count: int | None) -> str:
         f"Recomendación: {recommendation}",
     ]
     if payload.get("roi_pct") is not None and payload.get("margin_pct") is not None:
-        lines.append(f"ROI: {payload['roi_pct']}% | Margen: {payload['margin_pct']}%")
+        # Spanish-locale percentage formatting (comma decimal, space
+        # before "%"), same convention as the Motivo line below -
+        # applied here too for consistency within one message, not
+        # just where the worked example happened to show it.
+        lines.append(f"ROI: {format_pct_es(payload['roi_pct'])} | Margen: {format_pct_es(payload['margin_pct'])}")
     if payload.get("case_quantity") and payload.get("case_unit"):
         lines.append(f"Presentación: {payload['case_quantity']} {payload['case_unit']}")
     if payload.get("capital_required") is not None:

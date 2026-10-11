@@ -532,14 +532,14 @@ def test_motivo_case_pack_and_capital_required_in_summary_payload(db_session, su
     db_session.flush()
     trace = [
         {"rule": "financial_calculation", "result": "info", "reasoning": "x", "inputs": {"unit_cost": "10.00", "sell_price": "20.00", "profit": "7.00"}},
-        {"rule": "sales_velocity", "result": "pass", "reasoning": "60 sales-rank-improvement events/30d vs minimum 30", "inputs": {}},
+        {"rule": "sales_velocity", "result": "pass", "reasoning": "60 sales-rank-improvement events/30d vs minimum 30", "inputs": {"sales_rank_drops_30d": 60, "minimum": 30}},
     ]
     result = ClassificationResult(list_run_id=run.id, raw_line_item_id=item.id, amazon_data_snapshot_id=snapshot.id, classification=ClassificationLabel.BUY, roi=Decimal(30), margin=Decimal(15), rule_trace=trace)
     db_session.add(result)
     db_session.flush()
 
     approved = create_from_classification(db_session, result.id)
-    assert approved.summary_payload["motivo"] == "60 sales-rank-improvement events/30d vs minimum 30"
+    assert approved.summary_payload["motivo"] == "60 eventos de mejora de ranking de ventas en 30 días, frente al mínimo de 30."
     assert approved.summary_payload["case_quantity"] == "12"
     assert approved.summary_payload["case_unit"] == "DP"
     assert approved.summary_payload["capital_required"] == "120.00"
