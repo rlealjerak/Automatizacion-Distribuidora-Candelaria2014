@@ -10,7 +10,14 @@ package-mode = false
 # 3.12 explicitly for reproducible deploys, so this range just needs to
 # not reject whatever's installed locally.
 python = ">=3.11,<3.15"
-fastapi = "^0.115.0"
+# Was "^0.115.0" - found real and load-bearing while building the first
+# image since `mcp` was added as a dependency (2026-10-10): fastapi
+# 0.115.x caps starlette at <0.47.0, but mcp ^2.1.1 requires starlette
+# >=0.48.0 - mutually exclusive, so `poetry install` failed outright.
+# No poetry.lock existed in this repo at all to catch this earlier; this
+# is the first real `poetry install`/Docker build attempted since `mcp`
+# was added - every prior image (v1-v4) predates it.
+fastapi = ">=0.115.0,<1.0.0"
 uvicorn = { extras = ["standard"], version = "^0.32.0" }
 pydantic-settings = "^2.6.0"
 boto3 = "^1.35.0"
