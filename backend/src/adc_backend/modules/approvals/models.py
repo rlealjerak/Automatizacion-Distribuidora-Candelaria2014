@@ -25,7 +25,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Index, Integer, Text, func, text
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Index, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -94,6 +94,19 @@ class ApprovalQueue(Base):
     # real classification result.
     analysis_result_ref: Mapped[uuid.UUID] = mapped_column(ForeignKey("classification_results.id"), nullable=False)
 
+    # Short human-readable id (e.g. "D0001") for Telegram messages and
+    # tappable /aprobar_<code> commands - the UUID stays the real
+    # internal key everywhere else. Backed by a real Postgres SEQUENCE
+    # (approval_queue_short_code_seq, see migration 8f3b1c2d4e67), never
+    # a max()+1 computed in application code - sequential, unique, never
+    # reused even under concurrent inserts. Decided 2026-10-11.
+    short_code: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        unique=True,
+        server_default=text("'D' || lpad(nextval('approval_queue_short_code_seq')::text, 4, '0')"),
+    )
+
     type: Mapped[ApprovalItemType] = mapped_column(
         Enum(ApprovalItemType, name="approval_item_type"),
         default=ApprovalItemType.PURCHASE_RECOMMENDATION,
@@ -133,6 +146,15 @@ class ApprovalQueue(Base):
     pending_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_reminder_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reminder_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+    # Set the first (and only) time the "Nueva decisión pendiente"
+    # message actually sends for this item - distinct from
+    # last_reminder_at/reminder_count, which only track the numbered
+    # 1-6 reminders. NULL means not sent yet; reminder_job.py checks
+    # this, not reminder_count, to decide whether to send it - never
+    # set on a failed send, same discipline as last_reminder_at below.
+    # Decided 2026-10-11.
+    initial_notice_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resolution: Mapped[ApprovalResolution | None] = mapped_column(Enum(ApprovalResolution, name="approval_resolution"))

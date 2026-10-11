@@ -432,3 +432,114 @@ def test_revoke_decision_audit_log_preserves_approved_event_in_order(db_session,
     assert [e.event.value for e in events] == ["approved", "approval_revoked"]
     assert events[0].ok is True and events[0].note == "first pass looked good"
     assert events[1].ok is True and events[1].note == "misfire" and events[1].actor == "rob"
+
+
+# --- short_code (2026-10-11 decision: human-readable codes in Telegram messages) ---
+
+
+def test_short_code_is_assigned_and_well_formed(db_session, supplier):
+    from adc_backend.modules.approvals.service import create_from_classification
+    from adc_backend.modules.rules.models import ClassificationLabel
+
+    item = create_from_classification(db_session, _make_result(db_session, supplier.id, ClassificationLabel.BUY).id)
+    assert item.short_code is not None
+    assert item.short_code[0] == "D"
+    assert item.short_code[1:].isdigit()
+
+
+def test_short_codes_never_collide_across_items(db_session, supplier):
+    from adc_backend.modules.approvals.service import create_from_classification
+    from adc_backend.modules.rules.models import ClassificationLabel
+
+    first = create_from_classification(db_session, _make_result(db_session, supplier.id, ClassificationLabel.BUY).id)
+    second = create_from_classification(db_session, _make_result(db_session, supplier.id, ClassificationLabel.BUY).id)
+    assert first.short_code != second.short_code
+
+
+def test_resolve_active_item_accepts_short_code(db_session, supplier):
+    from adc_backend.modules.approvals.service import create_from_classification, resolve_active_item
+    from adc_backend.modules.rules.models import ClassificationLabel
+
+    active = create_from_classification(db_session, _make_result(db_session, supplier.id, ClassificationLabel.BUY).id)
+    out = resolve_active_item(db_session, active.short_code, "approved")
+    assert out.ok is True
+    assert out.approval_id == str(active.id)
+
+
+def test_resolve_active_item_accepts_lowercase_short_code(db_session, supplier):
+    from adc_backend.modules.approvals.service import create_from_classification, resolve_active_item
+    from adc_backend.modules.rules.models import ClassificationLabel
+
+    active = create_from_classification(db_session, _make_result(db_session, supplier.id, ClassificationLabel.BUY).id)
+    out = resolve_active_item(db_session, active.short_code.lower(), "approved")
+    assert out.ok is True
+
+
+def test_revoke_decision_accepts_short_code(db_session, supplier):
+    from adc_backend.modules.approvals.service import (
+        create_from_classification,
+        resolve_active_item,
+        revoke_decision,
+    )
+    from adc_backend.modules.rules.models import ClassificationLabel
+
+    only = create_from_classification(db_session, _make_result(db_session, supplier.id, ClassificationLabel.BUY).id)
+    resolve_active_item(db_session, str(only.id), "approved")
+
+    out = revoke_decision(db_session, only.short_code, reason="test", revoked_by="rob")
+    assert out.ok is True
+    assert out.approval_id == str(only.id)
+
+
+def test_reorder_queue_accepts_short_code(db_session, supplier):
+    from adc_backend.modules.approvals.service import create_from_classification, reorder_queue
+    from adc_backend.modules.rules.models import ClassificationLabel
+
+    create_from_classification(db_session, _make_result(db_session, supplier.id, ClassificationLabel.BUY).id)  # active
+    queued = create_from_classification(db_session, _make_result(db_session, supplier.id, ClassificationLabel.BUY).id)
+
+    reordered = reorder_queue(db_session, queued.short_code)
+    assert reordered.id == queued.id
+
+
+def test_resolve_approval_id_rejects_unknown_short_code(db_session):
+    from adc_backend.modules.approvals.service import resolve_active_item
+
+    out = resolve_active_item(db_session, "D9999", "approved")
+    assert out.ok is False
+
+
+def test_motivo_case_pack_and_capital_required_in_summary_payload(db_session, supplier):
+    from decimal import Decimal
+
+    from adc_backend.db.core_models import ListRun, SourceFileType
+    from adc_backend.modules.amazon.models import AmazonDataSnapshot
+    from adc_backend.modules.approvals.service import create_from_classification
+    from adc_backend.modules.ingestion.models import RawLineItem
+    from adc_backend.modules.rules.models import ClassificationLabel, ClassificationResult
+
+    run = ListRun(supplier_id=supplier.id, source_file_s3_key="s3://x/y.csv", source_file_original_filename="y.csv", source_file_type=SourceFileType.CSV)
+    db_session.add(run)
+    db_session.flush()
+    item = RawLineItem(
+        list_run_id=run.id, row_number=1, raw_data={}, unit_price=Decimal("10.00"),
+        description="Widget", case_quantity=Decimal("12"), case_unit_raw="DP",
+    )
+    db_session.add(item)
+    db_session.flush()
+    snapshot = AmazonDataSnapshot(list_run_id=run.id, raw_line_item_id=item.id, asin="B0CASEPACK", current_price=Decimal("20.00"))
+    db_session.add(snapshot)
+    db_session.flush()
+    trace = [
+        {"rule": "financial_calculation", "result": "info", "reasoning": "x", "inputs": {"unit_cost": "10.00", "sell_price": "20.00", "profit": "7.00"}},
+        {"rule": "sales_velocity", "result": "pass", "reasoning": "60 sales-rank-improvement events/30d vs minimum 30", "inputs": {}},
+    ]
+    result = ClassificationResult(list_run_id=run.id, raw_line_item_id=item.id, amazon_data_snapshot_id=snapshot.id, classification=ClassificationLabel.BUY, roi=Decimal(30), margin=Decimal(15), rule_trace=trace)
+    db_session.add(result)
+    db_session.flush()
+
+    approved = create_from_classification(db_session, result.id)
+    assert approved.summary_payload["motivo"] == "60 sales-rank-improvement events/30d vs minimum 30"
+    assert approved.summary_payload["case_quantity"] == "12"
+    assert approved.summary_payload["case_unit"] == "DP"
+    assert approved.summary_payload["capital_required"] == "120.00"

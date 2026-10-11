@@ -120,11 +120,22 @@ def _get_queued_items_ordered(db: Session) -> list[ApprovalQueue]:
     )
 
 
-def _parse_approval_id(approval_id: str) -> uuid.UUID | None:
+def _resolve_approval_id(db: Session, approval_id: str) -> uuid.UUID | None:
+    """
+    Accepts either the real UUID or the short human-readable code (e.g.
+    "D0001") - every caller (MCP tools, the admin REST endpoint) may be
+    given either, and the UUID stays the only internal key everywhere
+    past this point. Decided 2026-10-11, alongside adding `short_code`.
+    """
     try:
         return uuid.UUID(approval_id)
     except (ValueError, AttributeError, TypeError):
+        pass
+    if not isinstance(approval_id, str) or not approval_id.strip():
         return None
+    return db.execute(
+        select(ApprovalQueue.id).where(ApprovalQueue.short_code == approval_id.strip().upper())
+    ).scalar_one_or_none()
 
 
 def _active_id_str(db: Session) -> str | None:
@@ -230,6 +241,24 @@ def create_from_classification(db: Session, classification_result_id: uuid.UUID)
         financials=financials,
         rule_trace=result.rule_trace,
     )
+    # The decisive reasoning is always the LAST rule_trace entry for any
+    # item that reaches this function - engine.py's classify() only
+    # returns BUY/HIGH_RISK by falling through to its final append
+    # (sales_velocity for BUY; amazon_has_buy_box/seller_count_high_risk
+    # for HIGH_RISK), so "the last entry's reasoning" is a general rule
+    # here, not a guess at one specific rule name. Confirmed by reading
+    # engine.py directly, 2026-10-11 - used for the Spanish "Motivo:"
+    # line in reminder_job.py.
+    motivo = result.rule_trace[-1].get("reasoning") if result.rule_trace else None
+
+    case_quantity = line_item.case_quantity if line_item else None
+    case_unit = (line_item.case_unit_normalized or line_item.case_unit_raw) if line_item else None
+    capital_required = (
+        financials["unit_cost"] * case_quantity
+        if financials["unit_cost"] is not None and case_quantity is not None
+        else None
+    )
+
     summary_payload = {
         "asin": asin,
         "description": line_item.description if line_item else None,
@@ -240,7 +269,14 @@ def create_from_classification(db: Session, classification_result_id: uuid.UUID)
         "margin_pct": str(result.margin) if result.margin is not None else None,
         "unit_cost": str(financials["unit_cost"]) if financials["unit_cost"] is not None else None,
         "sell_price": str(financials["sell_price"]) if financials["sell_price"] is not None else None,
+        # Per-unit, not total - confirmed directly from engine.py:
+        # profit = (sell_price - fees) - unit_cost, where both sell_price
+        # and unit_cost are already per-unit figures.
         "profit": str(financials["profit"]) if financials["profit"] is not None else None,
+        "motivo": motivo,
+        "case_quantity": str(case_quantity) if case_quantity is not None else None,
+        "case_unit": case_unit,
+        "capital_required": str(capital_required) if capital_required is not None else None,
     }
 
     item = ApprovalQueue(
@@ -323,7 +359,7 @@ def resolve_active_item(
     not - "audit-log every call, including rejected ones" per the
     2026-10-08 owner decision alongside the revoke path below.
     """
-    approval_uuid = _parse_approval_id(approval_id)
+    approval_uuid = _resolve_approval_id(db, approval_id)
     if approval_uuid is None:
         error = f"approval_id {approval_id!r} is not a valid id"
         _log_audit_event(
@@ -446,7 +482,7 @@ def revoke_decision(db: Session, approval_id: str, reason: str, revoked_by: str)
     so nothing is stubbed - this comment is the marker for whoever
     builds that phase.
     """
-    approval_uuid = _parse_approval_id(approval_id)
+    approval_uuid = _resolve_approval_id(db, approval_id)
     if approval_uuid is None:
         error = f"approval_id {approval_id!r} is not a valid id"
         _log_audit_event(
@@ -509,7 +545,7 @@ def reorder_queue(db: Session, approval_id: str) -> ApprovalQueue:
     schema alone can enforce - see OPENCLAW_TECHNICAL_SPEC.md Section 4.3),
     not by anything checked here.
     """
-    approval_uuid = _parse_approval_id(approval_id)
+    approval_uuid = _resolve_approval_id(db, approval_id)
     if approval_uuid is None:
         raise ApprovalsServiceError(f"approval_id {approval_id!r} is not a valid id")
 
