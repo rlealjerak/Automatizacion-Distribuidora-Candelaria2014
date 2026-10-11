@@ -215,3 +215,34 @@ def test_failed_send_does_not_advance_state(db_session, active_item):
     db_session.refresh(active_item)
     assert active_item.reminder_count == 0
     assert active_item.last_reminder_at is None
+
+
+# --- _format_fetched_at_es (2026-10-11 decision: unambiguous, America/New_York, with age) ---
+
+
+def test_format_fetched_at_es_matches_the_worked_example():
+    from adc_backend.reminder_job import _format_fetched_at_es
+
+    # "10 oct, 9:43 p. m. (hace 12 h)" - the exact example given. UTC
+    # 2026-10-11 01:43 -> America/New_York (EDT, UTC-4) 2026-10-10 21:43.
+    fetched = "2026-10-11T01:43:00"
+    now = datetime(2026, 10, 11, 13, 43, tzinfo=UTC)  # 12h later
+    text, is_stale = _format_fetched_at_es(fetched, now)
+    assert text == "10 oct, 9:43 p. m. (hace 12 h)"
+    assert is_stale is False
+
+
+def test_format_fetched_at_es_stale_past_24h():
+    from adc_backend.reminder_job import _format_fetched_at_es
+
+    fetched = "2026-10-10T01:43:00"
+    now = datetime(2026, 10, 11, 13, 43, tzinfo=UTC)  # 36h later
+    text, is_stale = _format_fetched_at_es(fetched, now)
+    assert is_stale is True
+    assert "hace 1 d" in text
+
+
+def test_format_fetched_at_es_none_when_no_data():
+    from adc_backend.reminder_job import _format_fetched_at_es
+
+    assert _format_fetched_at_es(None, datetime.now(UTC)) == (None, False)

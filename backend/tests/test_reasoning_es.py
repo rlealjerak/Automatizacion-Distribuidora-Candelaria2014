@@ -69,17 +69,17 @@ def test_por_que_es_velocity_with_no_keepa_data_uses_plain_business_wording():
 
 def test_riesgo_es_buy_box_exact_wording():
     trace = [{"rule": "amazon_has_buy_box", "result": "fail", "inputs": {}}]
-    assert riesgo_es(trace) == "Amazon vende este producto y tiene la Buy Box."
+    assert riesgo_es(trace) == ["Amazon vende este producto y tiene la Buy Box."]
 
 
 def test_riesgo_es_seller_count_uses_real_number():
     trace = [{"rule": "seller_count_high_risk", "result": "fail", "inputs": {"seller_count": 14}}]
-    assert riesgo_es(trace) == "14 vendedores compitiendo por este producto."
+    assert riesgo_es(trace) == ["14 vendedores compitiendo por este producto."]
 
 
-def test_riesgo_es_none_when_no_risk_rule_present():
+def test_riesgo_es_empty_list_when_no_risk_rule_present():
     trace = [{"rule": "roi_threshold", "result": "pass", "inputs": {"roi_pct": "34.0", "threshold": "25"}}]
-    assert riesgo_es(trace) is None
+    assert riesgo_es(trace) == []
 
 
 def test_riesgo_es_finds_rule_by_name_not_position():
@@ -88,4 +88,27 @@ def test_riesgo_es_finds_rule_by_name_not_position():
         {"rule": "amazon_has_buy_box", "result": "fail", "inputs": {}},
         {"rule": "margin_threshold", "result": "pass", "inputs": {}},
     ]
-    assert riesgo_es(trace) == "Amazon vende este producto y tiene la Buy Box."
+    assert riesgo_es(trace) == ["Amazon vende este producto y tiene la Buy Box."]
+
+
+def test_riesgo_es_no_velocity_data_adds_flag_even_without_a_high_risk_rule():
+    # A BUY item (no amazon_has_buy_box/seller_count_high_risk present at
+    # all) can still carry a data-quality risk line - decided 2026-10-11,
+    # doesn't change what gets classified, only visibility.
+    trace = [
+        {"rule": "roi_threshold", "result": "pass", "inputs": {"roi_pct": "34.0", "threshold": "25"}},
+        {"rule": "margin_threshold", "result": "pass", "inputs": {"margin_pct": "18.5", "required_margin_pct": "10"}},
+        {"rule": "sales_velocity", "result": "info", "inputs": {}},
+    ]
+    assert riesgo_es(trace) == ["Sin datos de ventas (Keepa) para este producto."]
+
+
+def test_riesgo_es_can_return_both_a_risk_line_and_a_data_quality_line():
+    trace = [
+        {"rule": "amazon_has_buy_box", "result": "fail", "inputs": {}},
+        {"rule": "sales_velocity", "result": "info", "inputs": {}},
+    ]
+    assert riesgo_es(trace) == [
+        "Amazon vende este producto y tiene la Buy Box.",
+        "Sin datos de ventas (Keepa) para este producto.",
+    ]

@@ -544,7 +544,7 @@ def test_por_que_riesgo_case_pack_capital_and_fetched_at_in_summary_payload(db_s
     assert approved.summary_payload["por_que"] == (
         "ROI de 30.0% (mínimo 25.0%), margen de 15.0% (mínimo 10.0%), ventas estimadas de 60/mes (mínimo 30/mes)."
     )
-    assert approved.summary_payload["riesgo"] is None  # BUY, not HIGH_RISK - no risk line
+    assert approved.summary_payload["riesgo"] == []  # BUY, data present, no risk rule fired
     assert approved.summary_payload["fetched_at"] is not None
     assert approved.summary_payload["case_quantity"] == "12"
     assert approved.summary_payload["case_unit"] == "DP"

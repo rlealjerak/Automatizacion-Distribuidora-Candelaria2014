@@ -249,7 +249,11 @@ def create_from_classification(db: Session, classification_result_id: uuid.UUID)
     # (HIGH_RISK only) from whichever risk rule actually fired. See
     # modules/rules/reasoning_es.py.
     por_que = por_que_es(result.rule_trace)
-    riesgo = riesgo_es(result.rule_trace) if result.classification == ClassificationLabel.HIGH_RISK else None
+    # Not conditioned on classification here either (2026-10-11) -
+    # riesgo_es() can surface a data-quality flag (no Keepa velocity
+    # data at all) even on a BUY item; see its own docstring for why
+    # that's safe without a classification check at every call site.
+    riesgo = riesgo_es(result.rule_trace)
 
     case_quantity = line_item.case_quantity if line_item else None
     case_unit = (line_item.case_unit_normalized or line_item.case_unit_raw) if line_item else None

@@ -107,21 +107,45 @@ def por_que_es(rule_trace: list[dict]) -> str | None:
     return ", ".join(parts) + "."
 
 
-def riesgo_es(rule_trace: list[dict]) -> str | None:
+def riesgo_es(rule_trace: list[dict]) -> list[str]:
     """
-    HIGH_RISK only - whichever risk rule actually fired, found by name.
-    Returns None if neither is present (shouldn't happen for a real
-    HIGH_RISK item, but never fabricate a risk reason if it is).
+    Zero or more risk lines, found by rule name, never by position.
+    Can return more than one - a BUY item can still carry a data-quality
+    flag even though it isn't HIGH_RISK (see the third bullet below).
+
+    Not conditioned on classification from the outside (callers never
+    pass `classification` in) - each individual check is self-limiting:
+    amazon_has_buy_box/seller_count_high_risk simply never appear in the
+    trace at all for a genuine BUY item (engine.py's classify() only
+    reaches those two rules on a path that already returns HIGH_RISK),
+    so searching for them on a BUY trace safely finds nothing.
+
+    - amazon_has_buy_box present -> that risk line.
+    - else seller_count_high_risk present -> that risk line, with the
+      real seller count if its `inputs` has one.
+    - sales_velocity present with result "info" (no Keepa data at all)
+      -> a data-quality risk line, added 2026-10-11 regardless of
+      classification. Deliberately does NOT change what gets classified
+      BUY vs REVIEW vs anything else - that's a business-rule decision,
+      not something to silently alter here; it only adds visibility
+      into a BUY recommendation resting on zero sales-velocity evidence.
     """
+    reasons: list[str] = []
+
     buy_box = _find_rule(rule_trace, "amazon_has_buy_box")
     if buy_box is not None:
-        return "Amazon vende este producto y tiene la Buy Box."
+        reasons.append("Amazon vende este producto y tiene la Buy Box.")
+    else:
+        seller_count = _find_rule(rule_trace, "seller_count_high_risk")
+        if seller_count is not None:
+            count = (seller_count.get("inputs") or {}).get("seller_count")
+            if count is not None:
+                reasons.append(f"{count} vendedores compitiendo por este producto.")
+            else:
+                reasons.append("Muchos vendedores compitiendo por este producto.")
 
-    seller_count = _find_rule(rule_trace, "seller_count_high_risk")
-    if seller_count is not None:
-        count = (seller_count.get("inputs") or {}).get("seller_count")
-        if count is not None:
-            return f"{count} vendedores compitiendo por este producto."
-        return "Muchos vendedores compitiendo por este producto."
+    velocity = _find_rule(rule_trace, "sales_velocity")
+    if velocity is not None and velocity.get("result") == "info":
+        reasons.append("Sin datos de ventas (Keepa) para este producto.")
 
-    return None
+    return reasons

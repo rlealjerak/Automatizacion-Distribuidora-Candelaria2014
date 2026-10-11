@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
 
@@ -57,21 +58,48 @@ _RECOMMENDATION_ES = {
 }
 
 
-def _format_fetched_at(raw: str | None) -> str | None:
+_MONTHS_ES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
+_STALE_THRESHOLD = timedelta(hours=24)
+_NY_TZ = ZoneInfo("America/New_York")  # confirmed working in the real deployed image (python:3.12-slim), 2026-10-11 - not assumed
+
+
+def _format_fetched_at_es(raw: str | None, now: datetime) -> tuple[str | None, bool]:
     """
+    Unambiguous date (spelled-out month, not numeric - DD/MM vs MM/DD
+    never gets confused), America/New_York local time, with an "hace X"
+    age - e.g. "10 oct, 9:43 p. m. (hace 12 h)". Returns (text, is_stale)
+    where is_stale is True past 24h, so the caller can add the
+    "⚠️ Datos con más de 24 h" line.
+
     `summary_payload["fetched_at"]` is a naive-datetime isoformat string
     (AmazonDataSnapshot.fetched_at has no timezone=True - stored via
-    Postgres's own now(), which is UTC on this RDS instance same as
-    everywhere else in this project). Rendered DD/MM/YYYY HH:MM, the
-    Spanish date convention, not the US one.
+    Postgres's own now(), UTC on this RDS instance, same as everywhere
+    else in this project) - treated as UTC before converting.
     """
     if not raw:
-        return None
+        return None, False
     try:
         dt = datetime.fromisoformat(raw)
     except ValueError:
-        return None
-    return dt.strftime("%d/%m/%Y %H:%M") + " UTC"
+        return None, False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+
+    age = now - dt
+    if age < timedelta(seconds=90):
+        age_str = "hace unos segundos"
+    elif age < timedelta(hours=1):
+        age_str = f"hace {int(age.total_seconds() // 60)} min"
+    elif age < timedelta(days=1):
+        age_str = f"hace {int(age.total_seconds() // 3600)} h"
+    else:
+        age_str = f"hace {age.days} d"
+
+    ny = dt.astimezone(_NY_TZ)
+    hour12 = ny.hour % 12 or 12
+    ampm = "a. m." if ny.hour < 12 else "p. m."
+    formatted = f"{ny.day} {_MONTHS_ES[ny.month - 1]}, {hour12}:{ny.minute:02d} {ampm} ({age_str})"
+    return formatted, age > _STALE_THRESHOLD
 
 
 def _build_message_text(item: ApprovalQueue, reminder_count: int | None) -> str:
@@ -117,6 +145,14 @@ def _build_message_text(item: ApprovalQueue, reminder_count: int | None) -> str:
         f"Proveedor: {supplier}",
         f"Recomendación: {recommendation}",
     ]
+
+    # Directly under Recomendación, per explicit instruction (2026-10-11) -
+    # one line per reason; riesgo_es() can return more than one (e.g. a
+    # BUY item with no Keepa velocity data still gets a data-quality
+    # flag here even though it isn't HIGH_RISK).
+    for reason in payload.get("riesgo") or []:
+        lines.append(f"Riesgo: {reason}")
+
     if payload.get("roi_pct") is not None and payload.get("margin_pct") is not None:
         lines.append(f"ROI: {format_pct_es(payload['roi_pct'])} | Margen: {format_pct_es(payload['margin_pct'])}")
 
@@ -134,14 +170,14 @@ def _build_message_text(item: ApprovalQueue, reminder_count: int | None) -> str:
             f"Ganancia: {format_money_es(payload['profit'])}/unidad, {profit_per_case_str}/caja"
         )
 
-    fetched_at = _format_fetched_at(payload.get("fetched_at"))
+    fetched_at, is_stale = _format_fetched_at_es(payload.get("fetched_at"), datetime.now(UTC))
     if fetched_at:
-        lines.append(f"Datos de Amazon/Keepa obtenidos: {fetched_at}")
+        lines.append(f"Datos de Amazon/Keepa: {fetched_at}")
+        if is_stale:
+            lines.append("⚠️ Datos con más de 24 h")
 
     if payload.get("por_que"):
         lines.append(f"Por qué: {payload['por_que']}")
-    if payload.get("riesgo"):
-        lines.append(f"Riesgo: {payload['riesgo']}")
 
     lines += [
         "",
