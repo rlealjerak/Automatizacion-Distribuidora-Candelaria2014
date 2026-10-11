@@ -209,12 +209,33 @@ deploy done:
 
 ---
 
+## Current status (updated 2026-10-11, later still — PR #13's 3 review changes + first real-data pipeline test)
+
+**Three review changes built onto `feat/por-que-riesgo-money-format-polish` (PR #13), then merged and deployed as `:v8` - live-verified: `/health`'s commit SHA matches `git rev-parse HEAD` (`148e0fc...`), worker log clean, ALB target healthy, reminder schedule confirmed still `DISABLED` throughout. No schema change this round, no separate migration step needed.**
+
+1. **Data-freshness line rebuilt**: unambiguous (spelled-out month, never numeric DD/MM-vs-MM/DD), America/New_York local time, with an age - `"10 oct, 9:43 p. m. (hace 12 h)"`, matching the worked example exactly (confirmed via a direct test). A `"⚠️ Datos con más de 24 h"` line follows when the data is older than that. Verified `zoneinfo.ZoneInfo("America/New_York")` actually resolves inside the real deployed image before relying on it - `python:3.12-slim` has no guaranteed `tzdata`, but it worked when tested directly against `:v7`, not assumed.
+2. **`riesgo_es()` now returns a `list[str]`, not `str | None`**, and is no longer conditioned on classification at its call site - a BUY item with zero Keepa velocity data now gets `"Sin datos de ventas (Keepa) para este producto."` as a risk line too, same as a HIGH_RISK item's buy-box/seller-count line, without changing what gets classified BUY vs REVIEW (that's flagged back to the user as a business-rule decision, not touched here).
+3. **Riesgo line(s) moved to directly under Recomendación** (was near the bottom, after ROI/Margen/units).
+
+**First real-data pipeline test, through the actual REST upload path** (not a one-off script): 20 real rows hand-picked from a genuine MTZ (fragrance distributor) price list - 17 brands, $7.60-$104.50, real UPCs. Two real findings from running it for real:
+- **The auto-mapping proposed two wrong columns** on this file: `supplier_item_number` → "ORDER" (a blank leftover order-form column) and `case_quantity` → "UPC" (the barcode) - exactly the kind of noisy-file mistake the owner-confirmation step exists to catch, confirmed by actually using it, not assumed. Corrected by hand: `supplier_item_number` → `UPC` instead (the file's real item-number column has a *blank* header, which this API's mapping shape - field name → header string - can't reference at all; UPC is a real, stable per-product identifier and serves the same persistent-mapping purpose).
+- **2 of 20 rows failed with a real SP-API rate-limit error** (`SPAPIError: SP-API rate limited`) - confirms per-row error isolation works for real (18 others completed fine), but is a real signal that a genuine 5,000+-row run will need backoff/retry handling at scale, not just isolation. Flagged, not fixed this round.
+- **0 BUY, 0 HIGH_RISK, 0 NEGOTIATE, 0 NO_BUY out of 18 successfully-processed rows** - 7 got a low-confidence ASIN match (0.40-0.56, real `MIN_PROPOSAL_CONFIDENCE`/`LOW_CONFIDENCE_REVIEW_THRESHOLD` constants in `matching/engine.py`, confirmed by reading them) and landed in manual review; 11 got no match at all. Real, honest result for this specific file's description format (supplier text includes trailing item-number/country/case-pack noise that dilutes the fuzzy title match) - not a bug, but worth a future look at whether stripping that trailing noise before scoring would improve real match rates.
+- Per the user's own fallback instruction, created two synthetic items with a *complete* realistic `rule_trace` (unlike the original 3 PRUEBA items, which predate Por qué/Riesgo and lack roi_threshold/margin_threshold entirely) under a new "PRUEBA Test Supplier (Realista ...)" - `D0005` (BUY, 212 VIP Black) and `D0006` (HIGH_RISK, Acqua Di Gio Absolu, triggers the Buy Box risk rule), rendered through the real deployed `_build_message_text` against their real stored data - see rendered output sent in chat.
+
+187/187 tests pass.
+
+---
+
 ## Current status (updated 2026-10-11, later — text-polish round: Por qué/Riesgo, US$ money format; built, NOT deployed)
 
 **On branch `feat/por-que-riesgo-money-format-polish`, reviewed via
 re-rendered real-item output, deliberately not deployed** ("don't
 deploy this part until I review"). Builds directly on the `:v7` deploy
-in the entry just below (already live).
+in the entry just below (already live). **UPDATE, same day: approved
+with 3 further changes, merged, and deployed as `:v8`** - see the newer
+entry above for the live deploy, the 3 changes, and the first real-data
+pipeline test that followed it.
 
 **Motivo replaced with two separately-sourced lines, never "whichever
 rule is last" again.** New `por_que_es()`/`riesgo_es()` in
