@@ -27,6 +27,11 @@ class ReviewReason(str, enum.Enum):
     GATED_PENDING_STRONG_DEAL = "gated_pending_strong_deal"
     AMBIGUOUS_PARSE = "ambiguous_parse"
     AMBIGUOUS_RESTRICTION = "ambiguous_restriction"
+    # A UPC/EAN identifier lookup returned more than one ASIN for the same
+    # barcode (added 2026-10-11) - distinct from LOW_CONFIDENCE_MATCH
+    # since there's no fuzzy score to report, just a list of candidates
+    # the owner needs to pick from directly.
+    MULTIPLE_UPC_MATCHES = "multiple_upc_matches"
     OTHER = "other"
 
 

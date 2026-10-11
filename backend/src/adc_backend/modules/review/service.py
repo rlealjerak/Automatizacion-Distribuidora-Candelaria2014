@@ -43,6 +43,7 @@ def evaluate_and_route(db: Session, list_run_id: uuid.UUID, raw_line_item_id: uu
         match_confidence=float(match.match_confidence) if match and match.match_confidence is not None else None,
         classification=classification_result.classification if classification_result else None,
         classification_trace=classification_result.rule_trace if classification_result else None,
+        candidate_asins=match.candidate_asins if match else None,
     )
 
     outcome = determine_review_reason(state)

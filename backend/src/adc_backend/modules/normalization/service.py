@@ -46,6 +46,24 @@ def propose_mapping_for_run(db: Session, run_id: uuid.UUID) -> ListRun:
     return run
 
 
+def get_available_headers(db: Session, run_id: uuid.UUID) -> list[str]:
+    """
+    Every raw header this run's first row actually has, including
+    blank-header columns auto-named column_N by position (see
+    ingestion/parsers.py::_rows_from_grid). Exists so a caller can map a
+    field by position (e.g. "column_1") without already knowing that
+    naming convention - GET /runs/{run_id}/mapping only ever returned
+    best-guess proposed mappings before this (added 2026-10-11), with no
+    way to discover what else was available to map.
+    """
+    sample_row = db.execute(
+        select(RawLineItem).where(RawLineItem.list_run_id == run_id).order_by(RawLineItem.row_number).limit(1)
+    ).scalar_one_or_none()
+    if sample_row is None:
+        raise NormalizationError(f"list_run {run_id} has no raw line items to inspect")
+    return list(sample_row.raw_data.keys())
+
+
 @dataclass
 class ConfirmedMapping:
     """What the owner actually approved - one source header (or None) per canonical field."""
@@ -56,6 +74,11 @@ class ConfirmedMapping:
     unit_price: str | None
     case_quantity: str | None
     case_unit: str | None
+    # Its own field, deliberately independent of supplier_item_number
+    # (added 2026-10-11, for UPC-first matching - see
+    # modules/matching/engine.py). None if the source file has no UPC
+    # column at all.
+    upc: str | None = None
 
 
 def confirm_mapping(db: Session, run_id: uuid.UUID, mapping: ConfirmedMapping, confirmed_by: str) -> ListRun:
@@ -74,6 +97,7 @@ def confirm_mapping(db: Session, run_id: uuid.UUID, mapping: ConfirmedMapping, c
         "unit_price": mapping.unit_price,
         "case_quantity": mapping.case_quantity,
         "case_unit": mapping.case_unit,
+        "upc": mapping.upc,
     }
     run.column_mapping_confirmed_at = datetime.now(UTC)
     run.column_mapping_confirmed_by = confirmed_by
@@ -110,6 +134,7 @@ def apply_normalization(db: Session, run_id: uuid.UUID) -> dict[str, int]:
         raw_price_text = _get(raw, mapping.get("unit_price"))
         raw_case_qty_text = _get(raw, mapping.get("case_quantity"))
         raw_case_unit_text = _get(raw, mapping.get("case_unit"))
+        upc = _get(raw, mapping.get("upc"))
 
         outcome = classify_line_item(
             description=description,
@@ -118,6 +143,7 @@ def apply_normalization(db: Session, run_id: uuid.UUID) -> dict[str, int]:
         )
 
         item.supplier_item_number = supplier_item_number
+        item.upc = upc
         item.description = description
         item.brand = brand
         item.unit_price = outcome.unit_price

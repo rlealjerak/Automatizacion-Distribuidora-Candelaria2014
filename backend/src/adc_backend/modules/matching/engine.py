@@ -1,13 +1,32 @@
 """
 Matching engine: resolves a supplier line item to an Amazon ASIN.
 
-Per CLAUDE.md, no supplier provides UPC/EAN - matching is text/brand based
-against the Amazon catalog, and once the owner confirms a match it's saved
-permanently in `product_matches` (build-order step 2's schema) and reused
-instantly on future runs from that supplier, at high confidence, without
-calling SP-API again. This module is the "instantly" part: check the
-persistent mapping first, only call the catalog search when there's
-nothing confirmed to reuse.
+Once the owner confirms a match it's saved permanently in
+`product_matches` (build-order step 2's schema) and reused instantly on
+future runs from that supplier, at high confidence, without calling
+SP-API again. This module is the "instantly" part: check the persistent
+mapping first, only call the catalog search when there's nothing
+confirmed to reuse.
+
+UPC-first matching (added 2026-10-11): CLAUDE.md's "no supplier ever
+provides UPC/EAN" was disproved by the real MTZ price list. When a valid
+UPC/EAN is given (check-digit validated, not just the right digit count -
+see modules/matching/upc.py), it's tried FIRST via SP-API's identifier
+lookup - an exact barcode match is strictly more reliable than fuzzy
+text/brand scoring:
+  - exactly one ASIN back -> high confidence (1.0), MatchSource.UPC.
+  - zero ASINs back -> falls through to text/brand fuzzy matching below
+    (an unrecognized barcode isn't evidence of anything, it's just no
+    answer from this path).
+  - more than one ASIN back -> genuinely ambiguous (the same barcode
+    resolving to multiple real Amazon listings - happens with
+    reused/regional barcodes) - asin stays null, every candidate is
+    recorded on candidate_asins, and review routing (see
+    modules/review/routing.py) sends this to the owner rather than
+    picking one.
+Text/brand fuzzy matching (the original, still-default path) only runs
+when there's no UPC, the UPC fails check-digit validation, or the UPC
+lookup found nothing.
 
 This engine never sets a match to CONFIRMED itself - only the owner does,
 via `confirm_match` (called from the tool interface, step 10). Everything
@@ -25,7 +44,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from adc_backend.modules.amazon.sp_api_client import CatalogMatch, SPAPIClient
+from adc_backend.modules.matching.description_cleanup import clean_description_for_matching
 from adc_backend.modules.matching.models import MatchSource, MatchStatus, ProductMatch
+from adc_backend.modules.matching.upc import identifier_type_for_upc, validate_upc_ean_check_digit
+
+# A UPC-first match is an exact barcode hit, not a fuzzy guess - full
+# confidence, same scale as the fuzzy scorer's 0.0-1.0.
+UPC_MATCH_CONFIDENCE = 1.0
 
 # Below this, a proposed match isn't worth acting on even as a suggestion -
 # leave asin null and let the review queue (step 9) route it as a genuine
@@ -86,6 +111,55 @@ def get_persistent_match(db: Session, supplier_id: uuid.UUID, supplier_item_numb
     ).scalar_one_or_none()
 
 
+@dataclass
+class _ResolvedMatch:
+    asin: str | None
+    confidence: float | None
+    match_source: MatchSource
+    candidate_asins: list[str] | None = None
+
+
+def _resolve_via_upc(sp_api_client: SPAPIClient, upc: str) -> _ResolvedMatch | None:
+    """
+    None means "no usable UPC path" (invalid, or zero hits) - the caller
+    falls back to fuzzy matching in both cases. A non-None result always
+    carries a real outcome: one ASIN, or multiple candidates for review.
+    """
+    if not validate_upc_ean_check_digit(upc):
+        return None
+    identifier_type = identifier_type_for_upc(upc.strip())
+    if identifier_type is None:
+        return None
+
+    candidates = sp_api_client.search_catalog_items_by_identifier(upc.strip(), identifier_type)
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return _ResolvedMatch(asin=candidates[0].asin, confidence=UPC_MATCH_CONFIDENCE, match_source=MatchSource.UPC)
+    return _ResolvedMatch(
+        asin=None,
+        confidence=None,
+        match_source=MatchSource.UPC,
+        candidate_asins=[c.asin for c in candidates],
+    )
+
+
+def _resolve_via_fuzzy_text(
+    sp_api_client: SPAPIClient, description: str, brand: str | None
+) -> _ResolvedMatch:
+    cleaned_description = clean_description_for_matching(description)
+    candidates = sp_api_client.search_catalog_items(keywords=cleaned_description, brand=brand)
+    ranked = rank_candidates(cleaned_description, brand, candidates)
+    best = ranked[0] if ranked else None
+
+    # Confidence is recorded even below the proposal threshold (useful for
+    # audit/debugging "why didn't this match anything"), but asin is only
+    # set once it clears the bar - a sub-threshold ASIN isn't worth showing.
+    confidence = best.score if best else None
+    asin = best.candidate.asin if best and best.score >= MIN_PROPOSAL_CONFIDENCE else None
+    return _ResolvedMatch(asin=asin, confidence=confidence, match_source=MatchSource.AUTO)
+
+
 def find_or_propose_match(
     db: Session,
     sp_api_client: SPAPIClient,
@@ -94,43 +168,45 @@ def find_or_propose_match(
     supplier_item_number: str,
     description: str,
     brand: str | None,
+    upc: str | None = None,
 ) -> ProductMatch:
     """
     The core "instant reuse" behavior: a CONFIRMED persistent match short-
     circuits before any SP-API call happens at all. Anything else (no
     match yet, or a previous PROPOSED/REJECTED one) triggers a fresh
-    catalog search and produces/updates a PROPOSED match for the owner to
-    review - it does not overwrite a CONFIRMED match with a new guess.
+    lookup and produces/updates a PROPOSED match for the owner to review -
+    it does not overwrite a CONFIRMED match with a new guess.
+
+    UPC-first: a valid upc is tried via identifier lookup before any
+    fuzzy text/brand search runs at all. Only falls through to fuzzy
+    matching when upc is None/invalid, or the identifier lookup itself
+    found nothing - see module docstring.
     """
     existing = get_persistent_match(db, supplier_id, supplier_item_number)
     if existing is not None and existing.match_status == MatchStatus.CONFIRMED:
         return existing
 
-    candidates = sp_api_client.search_catalog_items(keywords=description, brand=brand)
-    ranked = rank_candidates(description, brand, candidates)
-    best = ranked[0] if ranked else None
-
-    # Confidence is recorded even below the proposal threshold (useful for
-    # audit/debugging "why didn't this match anything"), but asin is only
-    # set once it clears the bar - a sub-threshold ASIN isn't worth showing.
-    confidence = best.score if best else None
-    asin = best.candidate.asin if best and best.score >= MIN_PROPOSAL_CONFIDENCE else None
+    resolved = _resolve_via_upc(sp_api_client, upc) if upc else None
+    if resolved is None:
+        resolved = _resolve_via_fuzzy_text(sp_api_client, description, brand)
 
     if existing is not None:
-        existing.asin = asin
-        existing.match_confidence = confidence
+        existing.asin = resolved.asin
+        existing.match_confidence = resolved.confidence
         existing.match_status = MatchStatus.PROPOSED
-        existing.match_source = MatchSource.AUTO
+        existing.match_source = resolved.match_source
+        existing.candidate_asins = resolved.candidate_asins
         db.flush()
         return existing
 
     new_match = ProductMatch(
         supplier_id=supplier_id,
         supplier_item_number=supplier_item_number,
-        asin=asin,
-        match_confidence=confidence,
+        asin=resolved.asin,
+        match_confidence=resolved.confidence,
         match_status=MatchStatus.PROPOSED,
-        match_source=MatchSource.AUTO,
+        match_source=resolved.match_source,
+        candidate_asins=resolved.candidate_asins,
     )
     db.add(new_match)
     db.flush()

@@ -35,6 +35,7 @@ from adc_backend.modules.normalization.service import (
     ConfirmedMapping,
     NormalizationError,
     confirm_mapping,
+    get_available_headers,
     propose_mapping_for_run,
 )
 from adc_backend.modules.review.models import ManualReviewQueue, ReviewStatus
@@ -125,7 +126,8 @@ def get_proposed_mapping(run_id: uuid.UUID, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=str(e)) from e
     db.commit()
     mapping = {field: ProposedFieldMapping(**value) for field, value in run.proposed_column_mapping.items()}
-    return ProposedMappingOut(run_id=run_id, mapping=mapping)
+    available_headers = get_available_headers(db, run_id)
+    return ProposedMappingOut(run_id=run_id, mapping=mapping, available_headers=available_headers)
 
 
 @router.post("/runs/{run_id}/mapping/confirm", response_model=ListRunOut)
@@ -137,6 +139,7 @@ def confirm_run_mapping(run_id: uuid.UUID, body: ConfirmMappingRequest, db: Sess
         unit_price=body.unit_price,
         case_quantity=body.case_quantity,
         case_unit=body.case_unit,
+        upc=body.upc,
     )
     try:
         run = confirm_mapping(db, run_id, mapping, confirmed_by=body.confirmed_by)

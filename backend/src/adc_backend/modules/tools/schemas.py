@@ -75,6 +75,12 @@ class ProposedFieldMapping(BaseModel):
 class ProposedMappingOut(BaseModel):
     run_id: uuid.UUID
     mapping: dict[str, ProposedFieldMapping]
+    # Every raw header this run actually has, including blank-header
+    # columns auto-named by position (e.g. "column_1") - added 2026-10-11
+    # so a caller can map by position without already knowing that
+    # naming convention. `mapping` above only ever shows best-guess
+    # proposals, never the full available set.
+    available_headers: list[str]
 
 
 class ConfirmMappingRequest(BaseModel):
@@ -84,6 +90,9 @@ class ConfirmMappingRequest(BaseModel):
     unit_price: str | None = None
     case_quantity: str | None = None
     case_unit: str | None = None
+    # Its own field, deliberately independent of supplier_item_number -
+    # added 2026-10-11 for UPC-first matching (modules/matching/engine.py).
+    upc: str | None = None
     confirmed_by: str
 
 

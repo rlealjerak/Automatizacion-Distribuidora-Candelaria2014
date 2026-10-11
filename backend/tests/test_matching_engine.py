@@ -76,16 +76,29 @@ class TestRankCandidates:
 class _StubSPAPIClient:
     """Duck-typed stand-in for SPAPIClient - raises if called when a test expects it NOT to be (the instant-reuse guarantee)."""
 
-    def __init__(self, candidates: list[CatalogMatch] | None = None, should_not_be_called: bool = False):
+    def __init__(
+        self,
+        candidates: list[CatalogMatch] | None = None,
+        should_not_be_called: bool = False,
+        identifier_candidates: list[CatalogMatch] | None = None,
+    ):
         self._candidates = candidates or []
+        self._identifier_candidates = identifier_candidates if identifier_candidates is not None else []
         self._should_not_be_called = should_not_be_called
         self.call_count = 0
+        self.identifier_call_count = 0
 
     def search_catalog_items(self, keywords: str, marketplace_id: str = "", brand: str | None = None):
         if self._should_not_be_called:
             raise AssertionError("SP-API should not have been called - a CONFIRMED match should short-circuit this")
         self.call_count += 1
         return self._candidates
+
+    def search_catalog_items_by_identifier(self, identifier: str, identifier_type: str, marketplace_id: str = ""):
+        if self._should_not_be_called:
+            raise AssertionError("SP-API should not have been called - a CONFIRMED match should short-circuit this")
+        self.identifier_call_count += 1
+        return self._identifier_candidates
 
 
 @pytest.fixture
@@ -267,3 +280,150 @@ def test_reject_match_sets_status(db_session):
 
     rejected = reject_match(db_session, proposed.id, confirmed_by="owner@example.com")
     assert rejected.match_status == MatchStatus.REJECTED
+
+
+# --- UPC-first matching (added 2026-10-11) ---
+
+REAL_UPC = "8411061088180"  # real MTZ barcode (Carolina Herrera 212), check-digit valid
+REAL_12_DIGIT_UPC = "737052189765"  # real MTZ barcode, UPC-A length
+
+
+def test_valid_upc_single_hit_is_high_confidence_and_skips_fuzzy_search(db_session):
+    from adc_backend.modules.matching.engine import UPC_MATCH_CONFIDENCE, find_or_propose_match
+    from adc_backend.modules.matching.models import MatchSource, MatchStatus
+
+    supplier = _make_supplier(db_session)
+    stub = _StubSPAPIClient(
+        candidates=[CatalogMatch(asin="B0SHOULDNOTUSE", title="irrelevant", brand=None)],
+        identifier_candidates=[CatalogMatch(asin="B0UPCMATCH", title="212 Carolina Herrera", brand="Carolina Herrera")],
+    )
+
+    result = find_or_propose_match(
+        db_session,
+        stub,
+        supplier_id=supplier.id,
+        supplier_item_number="MTZ-1",
+        description="212 3.4 EDT L (100010) - Spain - 20pcs ByBox",
+        brand="CAROLINA HERRERA",
+        upc=REAL_UPC,
+    )
+    assert result.asin == "B0UPCMATCH"
+    assert float(result.match_confidence) == pytest.approx(UPC_MATCH_CONFIDENCE)
+    assert result.match_source == MatchSource.UPC
+    assert result.match_status == MatchStatus.PROPOSED
+    assert result.candidate_asins is None
+    assert stub.identifier_call_count == 1
+    assert stub.call_count == 0  # fuzzy text search never ran - UPC hit short-circuited it
+
+
+def test_valid_12_digit_upc_also_works(db_session):
+    from adc_backend.modules.matching.engine import find_or_propose_match
+    from adc_backend.modules.matching.models import MatchSource
+
+    supplier = _make_supplier(db_session)
+    stub = _StubSPAPIClient(identifier_candidates=[CatalogMatch(asin="B0UPCA", title="x", brand=None)])
+
+    result = find_or_propose_match(
+        db_session, stub, supplier_id=supplier.id, supplier_item_number="MTZ-2",
+        description="BOSS # 6 6.7 EDT M", brand="HUGO BOSS", upc=REAL_12_DIGIT_UPC,
+    )
+    assert result.asin == "B0UPCA"
+    assert result.match_source == MatchSource.UPC
+
+
+def test_upc_with_multiple_candidates_routes_to_review_not_auto_picked(db_session):
+    from adc_backend.modules.matching.engine import find_or_propose_match
+    from adc_backend.modules.matching.models import MatchSource, MatchStatus
+
+    supplier = _make_supplier(db_session)
+    stub = _StubSPAPIClient(
+        identifier_candidates=[
+            CatalogMatch(asin="B0FIRST", title="x", brand=None),
+            CatalogMatch(asin="B0SECOND", title="y", brand=None),
+        ]
+    )
+
+    result = find_or_propose_match(
+        db_session, stub, supplier_id=supplier.id, supplier_item_number="MTZ-3",
+        description="anything", brand=None, upc=REAL_UPC,
+    )
+    assert result.asin is None  # no single confident pick
+    assert result.match_confidence is None
+    assert result.match_source == MatchSource.UPC
+    assert result.candidate_asins == ["B0FIRST", "B0SECOND"]
+    assert result.match_status == MatchStatus.PROPOSED
+
+
+def test_upc_with_zero_hits_falls_back_to_fuzzy_text(db_session):
+    from adc_backend.modules.matching.engine import find_or_propose_match
+    from adc_backend.modules.matching.models import MatchSource
+
+    supplier = _make_supplier(db_session)
+    stub = _StubSPAPIClient(
+        candidates=[CatalogMatch(asin="B0FUZZY", title="Blue Widget", brand="Acme")],
+        identifier_candidates=[],  # valid barcode, but nothing came back
+    )
+
+    result = find_or_propose_match(
+        db_session, stub, supplier_id=supplier.id, supplier_item_number="MTZ-4",
+        description="Blue Widget", brand="Acme", upc=REAL_UPC,
+    )
+    assert result.asin == "B0FUZZY"
+    assert result.match_source == MatchSource.AUTO
+    assert stub.identifier_call_count == 1
+    assert stub.call_count == 1
+
+
+def test_invalid_upc_check_digit_falls_back_to_fuzzy_text_without_calling_identifier_lookup(db_session):
+    from adc_backend.modules.matching.engine import find_or_propose_match
+    from adc_backend.modules.matching.models import MatchSource
+
+    supplier = _make_supplier(db_session)
+    bad_upc = REAL_UPC[:-1] + str((int(REAL_UPC[-1]) + 1) % 10)  # corrupted check digit
+    stub = _StubSPAPIClient(candidates=[CatalogMatch(asin="B0FUZZY", title="Blue Widget", brand="Acme")])
+
+    result = find_or_propose_match(
+        db_session, stub, supplier_id=supplier.id, supplier_item_number="MTZ-5",
+        description="Blue Widget", brand="Acme", upc=bad_upc,
+    )
+    assert result.asin == "B0FUZZY"
+    assert result.match_source == MatchSource.AUTO
+    assert stub.identifier_call_count == 0  # never even tried - check-digit failed first
+
+
+def test_no_upc_at_all_uses_fuzzy_text_as_before(db_session):
+    from adc_backend.modules.matching.engine import find_or_propose_match
+    from adc_backend.modules.matching.models import MatchSource
+
+    supplier = _make_supplier(db_session)
+    stub = _StubSPAPIClient(candidates=[CatalogMatch(asin="B0FUZZY", title="Blue Widget", brand="Acme")])
+
+    result = find_or_propose_match(
+        db_session, stub, supplier_id=supplier.id, supplier_item_number="MTZ-6",
+        description="Blue Widget", brand="Acme", upc=None,
+    )
+    assert result.asin == "B0FUZZY"
+    assert result.match_source == MatchSource.AUTO
+    assert stub.identifier_call_count == 0
+
+
+def test_fuzzy_fallback_uses_cleaned_description_for_the_search_call(db_session):
+    """Description cleanup (strip trailing item#/country/case-pack noise)
+    must apply before the fuzzy search call, not just before scoring -
+    otherwise the noisy text still goes out over the wire to SP-API."""
+    from adc_backend.modules.matching.engine import find_or_propose_match
+
+    supplier = _make_supplier(db_session)
+    seen_keywords = {}
+
+    class _CapturingStub(_StubSPAPIClient):
+        def search_catalog_items(self, keywords, marketplace_id="", brand=None):
+            seen_keywords["value"] = keywords
+            return super().search_catalog_items(keywords, marketplace_id, brand)
+
+    stub = _CapturingStub(candidates=[CatalogMatch(asin="B0X", title="212", brand=None)])
+    find_or_propose_match(
+        db_session, stub, supplier_id=supplier.id, supplier_item_number="MTZ-7",
+        description="212 3.4 EDT L  (100010) - Spain - 20pcs ByBox", brand=None, upc=None,
+    )
+    assert seen_keywords["value"] == "212 3.4 EDT L"

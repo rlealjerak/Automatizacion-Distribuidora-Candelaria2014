@@ -68,6 +68,10 @@ FIELD_ALIASES: dict[str, list[str]] = {
         "PACK QTY",
     ],
     "case_unit": ["UNIT", "UOM", "UNIT OF MEASURE", "CASE UNIT", "PACK TYPE", "PACK UNIT"],
+    # Added 2026-10-11 - the real MTZ price list disproved CLAUDE.md's
+    # "no supplier ever provides UPC/EAN" assumption. See
+    # modules/matching/engine.py for the UPC-first matching this field feeds.
+    "upc": ["UPC", "EAN", "UPC/EAN", "BARCODE", "GTIN"],
 }
 
 # Below this score (0-100, rapidfuzz scale), a field is left unmapped
