@@ -34,7 +34,7 @@ from adc_backend.modules.approvals.models import (
 from adc_backend.modules.ingestion.models import RawLineItem
 from adc_backend.modules.matching.models import ProductMatch
 from adc_backend.modules.rules.models import ClassificationLabel, ClassificationResult
-from adc_backend.modules.rules.reasoning_es import motivo_es
+from adc_backend.modules.rules.reasoning_es import por_que_es, riesgo_es
 
 # Labels that create an approval item at all. Per explicit owner decision
 # (2026-08-28) this is BUY *and* HIGH_RISK, not BUY-only as the original
@@ -242,21 +242,14 @@ def create_from_classification(db: Session, classification_result_id: uuid.UUID)
         financials=financials,
         rule_trace=result.rule_trace,
     )
-    # The decisive rule is always the LAST rule_trace entry for any item
-    # that reaches this function - engine.py's classify() only returns
-    # BUY/HIGH_RISK by falling through to its final append
-    # (sales_velocity for BUY; amazon_has_buy_box/seller_count_high_risk
-    # for HIGH_RISK), so "the last entry" is a general rule here, not a
-    # guess at one specific rule name. Confirmed by reading engine.py
-    # directly, 2026-10-11.
-    #
-    # Rendered via a Spanish template keyed by that entry's `rule` code
-    # and filled from its own `inputs` dict - NOT a translation of the
-    # English `reasoning` string after the fact (explicit instruction,
-    # 2026-10-11, after the first version did exactly that and shipped
-    # English text in a Spanish-language message on HIGH_RISK items).
-    # See modules/rules/reasoning_es.py for the full rule-code coverage.
-    motivo = motivo_es(result.rule_trace[-1]) if result.rule_trace else None
+    # Built by looking up specific named rules anywhere in the trace -
+    # NOT "whichever entry happens to be last" (that was the first
+    # version of this, explicitly replaced 2026-10-11: "Por qué" always
+    # comes from roi_threshold/margin_threshold/sales_velocity; "Riesgo"
+    # (HIGH_RISK only) from whichever risk rule actually fired. See
+    # modules/rules/reasoning_es.py.
+    por_que = por_que_es(result.rule_trace)
+    riesgo = riesgo_es(result.rule_trace) if result.classification == ClassificationLabel.HIGH_RISK else None
 
     case_quantity = line_item.case_quantity if line_item else None
     case_unit = (line_item.case_unit_normalized or line_item.case_unit_raw) if line_item else None
@@ -280,10 +273,18 @@ def create_from_classification(db: Session, classification_result_id: uuid.UUID)
         # profit = (sell_price - fees) - unit_cost, where both sell_price
         # and unit_cost are already per-unit figures.
         "profit": str(financials["profit"]) if financials["profit"] is not None else None,
-        "motivo": motivo,
+        "por_que": por_que,
+        "riesgo": riesgo,
         "case_quantity": str(case_quantity) if case_quantity is not None else None,
         "case_unit": case_unit,
         "capital_required": str(capital_required) if capital_required is not None else None,
+        # When the live SP-API/Keepa data this recommendation is based on
+        # was actually fetched - shown to the owner as a freshness line,
+        # decided 2026-10-11. Naive datetime (AmazonDataSnapshot.fetched_at
+        # has no timezone=True) - fine here, only ever displayed, never
+        # used in later time-arithmetic, same reasoning as every other
+        # naive timestamp column in this codebase.
+        "fetched_at": snapshot.fetched_at.isoformat() if snapshot else None,
     }
 
     item = ApprovalQueue(

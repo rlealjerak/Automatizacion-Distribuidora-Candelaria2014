@@ -21,13 +21,14 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 
 from sqlalchemy.orm import Session
 
 from adc_backend.db.base import get_sessionmaker
 from adc_backend.modules.approvals.models import ApprovalQueue, ApprovalStatus
 from adc_backend.modules.approvals.service import list_queue
-from adc_backend.modules.rules.reasoning_es import format_pct_es
+from adc_backend.modules.rules.reasoning_es import format_money_es, format_pct_es
 from adc_backend.telegram_notifier import TelegramNotifier, TelegramNotifierError
 
 logging.basicConfig(level=logging.INFO)
@@ -56,6 +57,23 @@ _RECOMMENDATION_ES = {
 }
 
 
+def _format_fetched_at(raw: str | None) -> str | None:
+    """
+    `summary_payload["fetched_at"]` is a naive-datetime isoformat string
+    (AmazonDataSnapshot.fetched_at has no timezone=True - stored via
+    Postgres's own now(), which is UTC on this RDS instance same as
+    everywhere else in this project). Rendered DD/MM/YYYY HH:MM, the
+    Spanish date convention, not the US one.
+    """
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return dt.strftime("%d/%m/%Y %H:%M") + " UTC"
+
+
 def _build_message_text(item: ApprovalQueue, reminder_count: int | None) -> str:
     """
     Spanish-language message, built directly from `summary_payload`'s
@@ -64,15 +82,21 @@ def _build_message_text(item: ApprovalQueue, reminder_count: int | None) -> str:
     the two never get mixed.
 
     `reminder_count=None` renders the one-time "Nueva decisión
-    pendiente" notice (see check_and_send_reminder) - same body, no
-    "(Recordatorio N/6)" footer. Any int 1-6 renders a numbered reminder
-    with the "Decisión pendiente" header instead. Decided 2026-10-11.
+    pendiente" notice (see check_and_send_reminder). Any int 1-6 renders
+    a numbered reminder instead, with "Recordatorio N/6" at the very
+    top of the message (moved there from a footer, 2026-10-11 - the
+    client should see which reminder this is before reading anything
+    else).
 
     Short code (e.g. "D0001"), not the UUID, both in the header and in
     the reply commands - and formatted as `/aprobar_<code>` /
     `/rechazar_<code>` specifically (underscore, not a space) because
     Telegram renders a `/word_with_underscores` command as a tappable
-    link; `/aprobar <code>` as free text would not be.
+    link; `/aprobar <code>` as free text would not be. Resolving the
+    code back to a real approval_id is already case-insensitive
+    end-to-end (modules/approvals/service.py::_resolve_approval_id
+    upper-cases before comparing) - "toca" below is accurate, not
+    aspirational: the client can tap with either case and it works.
     """
     payload = item.summary_payload or {}
     product = payload.get("description") or "(sin descripción)"
@@ -81,37 +105,48 @@ def _build_message_text(item: ApprovalQueue, reminder_count: int | None) -> str:
     supplier = payload.get("supplier_name") or "(proveedor desconocido)"
     recommendation = _RECOMMENDATION_ES.get(payload.get("classification"), (payload.get("classification") or "").upper())
 
-    header = "Nueva decisión pendiente" if reminder_count is None else "Decisión pendiente"
+    if reminder_count is None:
+        header = f"Nueva decisión pendiente (ID: {item.short_code})"
+    else:
+        header = f"Recordatorio {reminder_count}/{MAX_REMINDERS} - Decisión pendiente (ID: {item.short_code})"
+
     lines = [
-        f"{header} (ID: {item.short_code})",
+        header,
         "",
         f"Producto: {product}",
         f"Proveedor: {supplier}",
         f"Recomendación: {recommendation}",
     ]
     if payload.get("roi_pct") is not None and payload.get("margin_pct") is not None:
-        # Spanish-locale percentage formatting (comma decimal, space
-        # before "%"), same convention as the Motivo line below -
-        # applied here too for consistency within one message, not
-        # just where the worked example happened to show it.
         lines.append(f"ROI: {format_pct_es(payload['roi_pct'])} | Margen: {format_pct_es(payload['margin_pct'])}")
-    if payload.get("case_quantity") and payload.get("case_unit"):
-        lines.append(f"Presentación: {payload['case_quantity']} {payload['case_unit']}")
-    if payload.get("capital_required") is not None:
-        unit_label = f" ({payload['case_quantity']} {payload['case_unit']})" if payload.get("case_quantity") else ""
-        lines.append(f"Capital requerido{unit_label}: ${payload['capital_required']}")
-    if payload.get("profit") is not None:
-        # Confirmed per-unit, not total - see service.py::create_from_classification's comment.
-        lines.append(f"Ganancia estimada por unidad: ${payload['profit']}")
-    if payload.get("motivo"):
-        lines.append(f"Motivo: {payload['motivo']}")
+
+    # Case size, investment, and profit per case AND per unit - one
+    # line, per explicit instruction (2026-10-11), not three.
+    if payload.get("case_quantity") and payload.get("case_unit") and payload.get("capital_required") is not None and payload.get("profit") is not None:
+        try:
+            profit_per_case = Decimal(payload["profit"]) * Decimal(payload["case_quantity"])
+            profit_per_case_str = format_money_es(profit_per_case)
+        except InvalidOperation:
+            profit_per_case_str = "?"
+        lines.append(
+            f"Presentación: {payload['case_quantity']} {payload['case_unit']} | "
+            f"Inversión: {format_money_es(payload['capital_required'])} | "
+            f"Ganancia: {format_money_es(payload['profit'])}/unidad, {profit_per_case_str}/caja"
+        )
+
+    fetched_at = _format_fetched_at(payload.get("fetched_at"))
+    if fetched_at:
+        lines.append(f"Datos de Amazon/Keepa obtenidos: {fetched_at}")
+
+    if payload.get("por_que"):
+        lines.append(f"Por qué: {payload['por_que']}")
+    if payload.get("riesgo"):
+        lines.append(f"Riesgo: {payload['riesgo']}")
 
     lines += [
         "",
-        f"Para decidir, responde: /aprobar_{item.short_code} o /rechazar_{item.short_code}",
+        f"Para decidir, toca: /aprobar_{item.short_code} o /rechazar_{item.short_code}",
     ]
-    if reminder_count is not None:
-        lines += ["", f"(Recordatorio {reminder_count}/{MAX_REMINDERS})"]
     return "\n".join(lines)
 
 

@@ -509,7 +509,7 @@ def test_resolve_approval_id_rejects_unknown_short_code(db_session):
     assert out.ok is False
 
 
-def test_motivo_case_pack_and_capital_required_in_summary_payload(db_session, supplier):
+def test_por_que_riesgo_case_pack_capital_and_fetched_at_in_summary_payload(db_session, supplier):
     from decimal import Decimal
 
     from adc_backend.db.core_models import ListRun, SourceFileType
@@ -532,14 +532,23 @@ def test_motivo_case_pack_and_capital_required_in_summary_payload(db_session, su
     db_session.flush()
     trace = [
         {"rule": "financial_calculation", "result": "info", "reasoning": "x", "inputs": {"unit_cost": "10.00", "sell_price": "20.00", "profit": "7.00"}},
-        {"rule": "sales_velocity", "result": "pass", "reasoning": "60 sales-rank-improvement events/30d vs minimum 30", "inputs": {"sales_rank_drops_30d": 60, "minimum": 30}},
+        {"rule": "roi_threshold", "result": "pass", "reasoning": "x", "inputs": {"roi_pct": "30", "threshold": "25"}},
+        {"rule": "margin_threshold", "result": "pass", "reasoning": "x", "inputs": {"margin_pct": "15", "required_margin_pct": "10"}},
+        {"rule": "sales_velocity", "result": "pass", "reasoning": "x", "inputs": {"sales_rank_drops_30d": 60, "minimum": 30}},
     ]
     result = ClassificationResult(list_run_id=run.id, raw_line_item_id=item.id, amazon_data_snapshot_id=snapshot.id, classification=ClassificationLabel.BUY, roi=Decimal(30), margin=Decimal(15), rule_trace=trace)
     db_session.add(result)
     db_session.flush()
 
     approved = create_from_classification(db_session, result.id)
-    assert approved.summary_payload["motivo"] == "60 eventos de mejora de ranking de ventas en 30 días, frente al mínimo de 30."
+    assert approved.summary_payload["por_que"] == (
+        "ROI de 30.0% (mínimo 25.0%), margen de 15.0% (mínimo 10.0%), ventas estimadas de 60/mes (mínimo 30/mes)."
+    )
+    assert approved.summary_payload["riesgo"] is None  # BUY, not HIGH_RISK - no risk line
+    assert approved.summary_payload["fetched_at"] is not None
+    assert approved.summary_payload["case_quantity"] == "12"
+    assert approved.summary_payload["case_unit"] == "DP"
+    assert approved.summary_payload["capital_required"] == "120.00"
     assert approved.summary_payload["case_quantity"] == "12"
     assert approved.summary_payload["case_unit"] == "DP"
     assert approved.summary_payload["capital_required"] == "120.00"

@@ -162,7 +162,7 @@ def test_five_minute_threshold_sends_first_reminder(db_session, active_item):
 
     assert outcome == "reminder_sent:1"
     assert len(notifier.sent) == 1
-    assert "(Recordatorio 1/6)" in notifier.sent[0]
+    assert notifier.sent[0].startswith("Recordatorio 1/6 - Decisión pendiente")
     db_session.refresh(active_item)
     assert active_item.status == ApprovalStatus.REMINDER_1
     assert active_item.reminder_count == 1
