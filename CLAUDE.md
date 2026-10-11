@@ -209,12 +209,78 @@ deploy done:
 
 ---
 
+## Current status (updated 2026-10-11, later — text-polish round: Por qué/Riesgo, US$ money format; built, NOT deployed)
+
+**On branch `feat/por-que-riesgo-money-format-polish`, reviewed via
+re-rendered real-item output, deliberately not deployed** ("don't
+deploy this part until I review"). Builds directly on the `:v7` deploy
+in the entry just below (already live).
+
+**Motivo replaced with two separately-sourced lines, never "whichever
+rule is last" again.** New `por_que_es()`/`riesgo_es()` in
+`modules/rules/reasoning_es.py` (the old generic last-entry
+`motivo_es()` + its 13-rule template dict are gone - this rewrite
+searches the trace *by rule name*, not position). "Por qué" (BUY and
+HIGH_RISK alike) comes from `roi_threshold` + `margin_threshold` +
+`sales_velocity`, found anywhere in the trace; "Riesgo" (HIGH_RISK
+only) from whichever risk rule actually fired. Plain business Spanish
+throughout - "ventas estimadas," not "eventos de mejora de ranking";
+the Buy Box line reads exactly "Amazon vende este producto y tiene la
+Buy Box."
+
+**Number format reversed from the prior round, per explicit
+instruction: decimal point now, not comma** - `format_pct_es` →
+`"34.0%"` (one decimal, no space, forced even when the source had
+none - e.g. a plain `"25"` threshold now also renders `"25.0%"`, for
+real "one format everywhere," not just wherever the source happened to
+already have a decimal). New `format_money_es` → `"US$360.00"` /
+`"US$1,234.56"` (comma thousands, period decimals, `US$` prefix) -
+applied to capital required, profit, and the new combined units line.
+
+**Units collapsed into one line** (case size, investment, profit per
+unit AND per case) - was three separate lines. **Reminder header
+moved**: `"Recordatorio N/6"` is now the first thing in the message,
+not a footer. `"toca"` replaces `"responde"` in the reply instruction
+(accurate, not aspirational - command resolution was already
+case-insensitive end-to-end before this round, confirmed by rereading
+`_resolve_approval_id`, not re-built). New data-freshness line (`AmazonDataSnapshot.fetched_at`,
+confirmed to already exist and already be populated - no schema
+change needed for this one).
+
+**Real, honest finding while re-rendering the 3 real PRUEBA items for
+review (not invented ones, per instruction):** their `rule_trace` was
+hand-built when they were created, months before `por_que`/`riesgo`
+existed, and only contains `financial_calculation` (+
+`amazon_has_buy_box` for the HIGH_RISK one) - never `roi_threshold`/
+`margin_threshold`/`sales_velocity`, which a real `engine.py` classify()
+run always produces. Result: **re-rendered truthfully, these three show
+no "Por qué" line at all** - not a bug, a real consequence of synthetic
+test data predating the feature it's being used to demonstrate. Left
+them untouched rather than silently patch their data (per "leave the
+PRUEBA items" from the prior round).
+
+**Standalone question answered, nothing changed because of it:** yes,
+an item can reach BUY with zero sales-velocity data - under
+`sales_velocity` itself, when `sales_rank_drops_30d is None` (no Keepa
+data at all), `engine.py` appends an `"info"` entry ("no data,
+proceeding without it") and falls through to BUY rather than blocking
+on missing Keepa data.
+
+182/182 tests pass - `test_reasoning_es.py` and the affected
+`test_approvals_service.py`/`test_reminder_job.py` cases were rewritten
+for the new Por qué/Riesgo structure, not just added to.
+
+---
+
 ## Current status (updated 2026-10-11 — short codes, Spanish reminders, immediate notice; built, NOT deployed)
 
 **Everything below is built, tested, committed on branch
 `feat/short-codes-spanish-reminders-initial-notice`, and reviewed via
 rendered output - but deliberately not built into an image or deployed.
-Explicit instruction this round: "don't deploy until I approve."**
+Explicit instruction this round: "don't deploy until I approve."
+UPDATE: approved and deployed as `:v7` the same day - see the newer
+entry above for the live deploy + verification, and for the
+superseding text-polish round that replaced Motivo with Por qué/Riesgo.**
 
 **Short codes.** New `approval_queue.short_code` column (e.g. `D0001`),
 backed by a real Postgres `SEQUENCE` (never a `max()+1` computed in
