@@ -79,11 +79,74 @@ def test_no_active_item_is_a_noop(db_session):
     assert notifier.sent == []
 
 
-def test_not_yet_due_is_a_noop(db_session, active_item):
+# --- initial "Nueva decisión pendiente" notice (2026-10-11 decision) ---
+
+
+def test_initial_notice_sent_immediately_regardless_of_elapsed_time(db_session, active_item):
     from adc_backend.reminder_job import check_and_send_reminder
 
     notifier = FakeNotifier()
-    outcome = check_and_send_reminder(db_session, notifier, datetime.now(UTC) + timedelta(minutes=2))
+    # No time has elapsed at all - the initial notice still fires, unlike
+    # a reminder, which would need to wait for INITIAL_WAIT.
+    outcome = check_and_send_reminder(db_session, notifier, active_item.pending_started_at)
+
+    assert outcome == "initial_notice_sent"
+    assert len(notifier.sent) == 1
+    assert "Nueva decisión pendiente" in notifier.sent[0]
+    assert "Recordatorio" not in notifier.sent[0]
+    db_session.refresh(active_item)
+    assert active_item.initial_notice_sent_at == active_item.pending_started_at
+    # Sending the initial notice must not itself advance reminder state.
+    assert active_item.reminder_count == 0
+
+
+def test_initial_notice_sent_at_most_once(db_session, active_item):
+    from adc_backend.reminder_job import check_and_send_reminder
+
+    notifier = FakeNotifier()
+    now = active_item.pending_started_at
+    first = check_and_send_reminder(db_session, notifier, now)
+    second = check_and_send_reminder(db_session, notifier, now + timedelta(seconds=1))
+
+    assert first == "initial_notice_sent"
+    assert second == "not_due"  # reminder timing, not a resend of the initial notice
+    assert len(notifier.sent) == 1
+
+
+def test_initial_notice_failed_send_does_not_mark_sent(db_session, active_item):
+    from adc_backend.reminder_job import check_and_send_reminder
+
+    failing = FakeNotifier(fail=True)
+    outcome = check_and_send_reminder(db_session, failing, active_item.pending_started_at)
+    assert outcome == "send_failed"
+    db_session.refresh(active_item)
+    assert active_item.initial_notice_sent_at is None
+
+    # Next run (a working notifier) still sends it - nothing was skipped.
+    working = FakeNotifier()
+    outcome = check_and_send_reminder(db_session, working, active_item.pending_started_at + timedelta(seconds=5))
+    assert outcome == "initial_notice_sent"
+    assert len(working.sent) == 1
+
+
+def _send_initial_notice(db_session, active_item):
+    """Every reminder-timing test below needs this out of the way first."""
+    from adc_backend.reminder_job import check_and_send_reminder
+
+    check_and_send_reminder(db_session, FakeNotifier(), active_item.pending_started_at)
+    db_session.refresh(active_item)
+
+
+# --- reminder cadence (unchanged from the LOCKED state machine spec; the
+# initial notice above is a new, additional step, not a replacement) ---
+
+
+def test_not_yet_due_is_a_noop(db_session, active_item):
+    from adc_backend.reminder_job import check_and_send_reminder
+
+    _send_initial_notice(db_session, active_item)
+    notifier = FakeNotifier()
+    outcome = check_and_send_reminder(db_session, notifier, active_item.pending_started_at + timedelta(minutes=2))
     assert outcome == "not_due"
     assert notifier.sent == []
 
@@ -92,12 +155,14 @@ def test_five_minute_threshold_sends_first_reminder(db_session, active_item):
     from adc_backend.modules.approvals.models import ApprovalStatus
     from adc_backend.reminder_job import check_and_send_reminder
 
+    _send_initial_notice(db_session, active_item)
     notifier = FakeNotifier()
     now = active_item.pending_started_at + timedelta(minutes=5, seconds=1)
     outcome = check_and_send_reminder(db_session, notifier, now)
 
     assert outcome == "reminder_sent:1"
     assert len(notifier.sent) == 1
+    assert "(Recordatorio 1/6)" in notifier.sent[0]
     db_session.refresh(active_item)
     assert active_item.status == ApprovalStatus.REMINDER_1
     assert active_item.reminder_count == 1
@@ -108,6 +173,7 @@ def test_reminder_cadence_through_sixth_then_holding(db_session, active_item):
     from adc_backend.modules.approvals.models import ApprovalStatus
     from adc_backend.reminder_job import check_and_send_reminder
 
+    _send_initial_notice(db_session, active_item)
     notifier = FakeNotifier()
     now = active_item.pending_started_at + timedelta(minutes=5, seconds=1)
     check_and_send_reminder(db_session, notifier, now)  # reminder_1
@@ -140,6 +206,7 @@ def test_reminder_cadence_through_sixth_then_holding(db_session, active_item):
 def test_failed_send_does_not_advance_state(db_session, active_item):
     from adc_backend.reminder_job import check_and_send_reminder
 
+    _send_initial_notice(db_session, active_item)
     notifier = FakeNotifier(fail=True)
     now = active_item.pending_started_at + timedelta(minutes=5, seconds=1)
     outcome = check_and_send_reminder(db_session, notifier, now)
