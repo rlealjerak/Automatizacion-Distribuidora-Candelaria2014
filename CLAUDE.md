@@ -174,6 +174,117 @@ owner must be able to see *why*, not just the label.
 - This system's outputs directly drive real purchase decisions —
   correctness and explainability matter more than speed of delivery.
 
+## Deploy checklist
+
+Added 2026-10-10 after discovering `main` and the actually-running
+container had drifted for ~1.5 months with nobody noticing (see that
+date's status block below for the full story). Before considering any
+deploy done:
+
+1. Diff the commit the currently-deployed image was built from against
+   the target commit, grouped by area - flag anything touching the DB
+   schema, the SQS worker, the EventBridge reminder job, or env
+   vars/secrets.
+2. If the DB schema changed: run migrations as their own logged step
+   (a one-off `ecs run-task` with the new image, not relying on
+   `entrypoint.sh`'s automatic migrate-on-start to race with a service
+   rollout), confirm `alembic current` matches `alembic heads` before
+   touching any service.
+3. Take a manual RDS snapshot first if the migration isn't purely
+   additive, or if in doubt.
+4. **After deploying: `curl /health` and confirm `commit` matches
+   `git rev-parse HEAD` of the branch you just deployed.** This is the
+   single check that would have caught the 2026-10-10 drift on day one
+   instead of ~1.5 months later - never skip it, and never conclude a
+   deploy succeeded just because `terraform apply`/the ECS rollout
+   reported success. A completed rollout means the new task definition
+   started; it does not mean the image actually contains the code you
+   think it does.
+5. Verify the specific thing that changed actually works against the
+   real endpoint (not just that the service is "stable") - e.g. a real
+   authenticated request, not just a health check.
+
+---
+
+## Current status (updated 2026-10-10 — v5/v6 deploy: real image drift found and fixed)
+
+**The MCP server, approval queue, and revoke path - all merged into
+`main` and reported as "live" in this file's own prior entries (2026-09-14,
+2026-10-08/09) - had never actually been deployed.** Verified by curling
+the real `/mcp` endpoint: it returned the exact same generic 404 as a
+deliberately fake path, which only happens if the auth middleware
+wrapping that whole route isn't in the running app at all. Cross-checked
+against ECS: the live task definition still referenced image `:v4`,
+built 2026-08-20 - before the `mcp_server`/`approvals` modules existed.
+**Correcting this session's own earlier chat claim, since it was wrong
+and nothing in this file said so until now: "main matches what's
+deployed in production" was never true after that point** - git state
+and runtime reality diverged the moment any backend code merged after
+`:v4` was built, and no one had re-checked since. The new "Deploy
+checklist" above exists specifically so this stops being something that
+has to be independently rediscovered.
+
+**A second, unrelated bug found while building the fix: `main`'s
+`pyproject.toml`/`poetry.lock` couldn't actually produce a working
+Docker image at all.** `fastapi ^0.115.0` caps `starlette` at `<0.47.0`;
+`mcp ^2.1.1` requires `starlette >=0.48.0` - mutually exclusive. No
+`poetry.lock` existed in the repo to catch this earlier; this was
+genuinely the first `poetry install`/Docker build attempted since `mcp`
+was added as a dependency. Fixed by relaxing `fastapi` to
+`">=0.115.0,<1.0.0"` and generating a real lock file (resolves to
+fastapi 0.143.0/starlette 1.7.0/mcp 2.3.0); 159/159 tests pass against
+it.
+
+**A third, independent bug found by actually calling Telegram's real
+API rather than trusting the secret's existence:** `adc/prod/telegram-reminder`'s
+`chat_id` is the bot's own account id, not a real person's - confirmed
+by comparing it directly against `getMe`. Reminders have never had a
+real human recipient. The EventBridge schedule is now explicitly
+`DISABLED` in Terraform (not just the console, so it can't silently
+drift back to enabled on a later apply) until this is fixed and
+reviewed.
+
+**The actual deploy, done carefully given the above:** built `:v5` from
+`main` (first image since `mcp` was added), ran the two pending
+migrations (`add_approval_queue`, `add_approval_audit_log` - both
+additive-only, confirmed by reading each migration's `upgrade()`
+directly) as a separate logged one-off task *before* either service was
+updated, then rolled `backend`+`worker` via Terraform (both share one
+image with `reminder_job`, confirmed in `ecs_cluster/main.tf`). Built
+`:v6` immediately after to land the `/health` commit-SHA feature (see
+below) live in the same session rather than leaving it only committed.
+
+**Live-verified end to end, for real, not inferred from "the deployment
+completed":**
+- `POST /mcp` with no token → `401`; the same request against a
+  deliberately fake path also now `401`s (confirms the root mount is
+  actually present - it wasn't, before this deploy).
+- `initialize` and `tools/list` with the real bearer token → `200`,
+  returns exactly the 4 expected tools
+  (`list_queue`/`approve_decision`/`reorder_queue`/`revoke_decision`).
+- `/health` → `200`, ALB target group shows a healthy target.
+- `worker` service stable, clean startup log, no errors on the new task.
+- A manual one-off `reminder_job` run now imports cleanly and exits
+  `"no_active_item"` (queue is empty) instead of the `ModuleNotFoundError`
+  it had been throwing on every scheduled invocation since 2026-08-28.
+- `/health`'s `commit` field returns `c1f747217b32e06072b449ab7f67388c110bd528`
+  (then updated again post-`:v6`), matching `git rev-parse HEAD` exactly.
+
+**Rollback note:** the pre-deploy task-definition revisions
+(`adc-prod-backend:7`, `adc-prod-worker:4`, `adc-prod-reminder-job:2`,
+all on `:v4`) are still registered and would still run correctly
+against the migrated schema if ever needed - both new migrations are
+additive-only (new tables, no `ALTER`/rename/data changes), so the old
+code simply doesn't know about the two new tables rather than breaking
+against them. A manual RDS snapshot (`adc-prod-db-pre-mcp-deploy`) was
+taken and confirmed available before any of this started.
+
+**Still open, unchanged by this session:** `telegram-reminder`'s
+`chat_id` needs a real person's id before the schedule can be
+re-enabled (collection procedure is in `openclaw/README.md`); OpenClaw's
+own infrastructure (EFS/ECS) still doesn't exist; `ANTHROPIC_API_KEY`
+still needs a real value + spend limit.
+
 ---
 
 ## Current status (updated 2026-10-09 — OpenClaw brought into this repo)
@@ -418,7 +529,20 @@ applied by the account admin directly against the real `claude-code` IAM
 user (it has no `iam:PutUserPolicy` on itself, same as every prior
 round), then the apply retried clean.
 
-**Confirmed, not yet a live risk:** the schedule is now firing
+**CORRECTION (added 2026-10-10, see that date's status block for the
+full story): the paragraph below was wrong.** The schedule's
+infra (role, policy, schedule resource, task definition *shape*) was
+genuinely applied, but the task definition still pointed at the `:v4`
+image - built before `reminder_job.py` existed at all. The schedule had
+actually been failing every single invocation since it started, with
+`No module named adc_backend.reminder_job`, confirmed via real
+CloudWatch logs on 2026-10-10. Nobody checked the actual log output
+before writing the claim below; the task definition revision bump was
+mistaken for a code change. Left in place, struck through in spirit
+rather than deleted, as a reminder to verify log output directly rather
+than inferring success from "the deployment completed."
+
+~~**Confirmed, not yet a live risk:** the schedule is now firing
 `reminder_job.py` every minute for real, but `check_and_send_reminder`
 returns `"no_active_item"` and exits before ever touching the
 still-placeholder `telegram-reminder` secret whenever the approval queue
@@ -426,7 +550,7 @@ is empty (`reminder_job.py:55-57`) - true right now, since no real
 supplier-list run has landed a `BUY`/`HIGH_RISK` classification in prod
 yet. This stops being harmless the moment one does, so populating real
 `telegram-reminder`/`openclaw-backend-token` values is worth doing before
-that happens, not after.
+that happens, not after.~~
 
 **Still open, unchanged from 2026-08-28:** real secret values for both
 new secrets (`telegram-reminder`'s `chat_id` still blocked on the owner
