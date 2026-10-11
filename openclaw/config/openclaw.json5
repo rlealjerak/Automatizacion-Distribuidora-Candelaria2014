@@ -55,7 +55,7 @@
 
   // Model choice is a security control here, not just a quality choice
   // (OPENCLAW_DEPLOYMENT_PLAN.md Section 0b) - OpenClaw holds this
-  // backend's bearer token and can call approve_decision/revoke_decision,
+  // backend's bearer token and can call approve_decision,
   // so a frontier-tier model is used deliberately, not a cheaper one.
   // claude-sonnet-5 chosen over claude-opus-5 as the default: strong
   // tool-use/prompt-injection resistance at a cost appropriate for a
@@ -93,7 +93,11 @@
         requestTimeoutMs: 20000,
         connectionTimeoutMs: 5000,
         headers: { Authorization: "Bearer ${CANDELARIA_BACKEND_TOKEN}" },
-        toolFilter: { include: ["list_queue", "approve_decision", "reorder_queue", "revoke_decision"] },
+        // revoke_decision deliberately excluded (decided 2026-10-11) -
+        // admin REST only (POST /approvals/{id}/revoke) for now, since
+        // nothing threads a specific Telegram user's identity through
+        // MCP yet. See CLAUDE.md.
+        toolFilter: { include: ["list_queue", "approve_decision", "reorder_queue"] },
       },
     },
   },

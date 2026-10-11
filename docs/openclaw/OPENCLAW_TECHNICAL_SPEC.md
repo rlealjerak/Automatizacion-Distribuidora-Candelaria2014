@@ -45,8 +45,11 @@ Source: `docs.openclaw.ai/gateway/configuration-reference`, `mcp.servers` schema
         headers: {
           Authorization: "Bearer ${CANDELARIA_BACKEND_TOKEN}",
         },
+        // revoke_decision was briefly included here 2026-10-09, removed
+        // 2026-10-11 - admin REST only now (Section 4.4 below), since
+        // no per-user Telegram identity is threaded through MCP yet.
         toolFilter: {
-          include: ["list_queue", "approve_decision", "reorder_queue", "revoke_decision"],
+          include: ["list_queue", "approve_decision", "reorder_queue"],
         },
       },
     },
@@ -60,7 +63,7 @@ Source: `docs.openclaw.ai/gateway/configuration-reference`, `mcp.servers` schema
 
 Notes:
 - `${CANDELARIA_BACKEND_TOKEN}` resolves via OpenClaw's env-var substitution — sourced from the ECS task definition's injected Secrets Manager value. No plaintext token in config.
-- `toolFilter.include` restricts OpenClaw's visibility to exactly the four tools this bot needs (added `revoke_decision` 2026-10-09, confirmed by the project owner) — nothing else from the backend is exposed even if the MCP wrapper adds more tools later without updating this filter.
+- `toolFilter.include` restricts OpenClaw's visibility to exactly the three tools this bot needs — nothing else from the backend is exposed even if the MCP wrapper adds more tools later without updating this filter. `revoke_decision` was briefly included 2026-10-09; removed 2026-10-11 once the actor-attribution limitation was weighed against exposing it on a live demo — see Section 4.4.
 - `tools.profile: "minimal"` overrides the framework's default `"coding"` profile (which would otherwise expose filesystem/exec/web tools this bot has no business having). This is a deliberate hardening step beyond what's strictly required — the approval bot should not be able to run shell commands or browse the web.
 - **Stub-first sequencing (per your item #1 decision):** point `url` at a local/stub MCP server during Phase 2 (base setup), swap to the real `https://` backend URL only once domain/TLS is confirmed live. This is a one-line config change, not a redeploy of logic.
 
@@ -194,9 +197,9 @@ Moves a specified queued item to the front of the queue (i.e., it becomes next a
 }
 ```
 
-### 4.4 `revoke_decision`
+### 4.4 `revoke_decision` (admin REST only - NOT an OpenClaw/MCP tool)
 
-Reverses a previously-**approved** item back into pending/queued. Added 2026-10-09 per the project owner's confirmation ("approvals must be reversible") - backed by the same `approval_audit_log` the admin REST endpoint writes to, so a revoke from Telegram and a revoke from Rob's own admin testing are both fully auditable, in the same place.
+Reverses a previously-**approved** item back into pending/queued. Added as an MCP tool 2026-10-09, then deliberately removed from `toolFilter.include` 2026-10-11 ("keep it out of OpenClaw for now, admin REST only" - known, accepted limitation for the demo: nothing threads a specific Telegram user's identity through MCP yet, so every MCP-originated revoke would be attributed to the same fixed string in the audit log, not a real person). This is now reachable only via `POST /approvals/{id}/revoke` behind the backend's `X-Api-Key`, for Rob's own admin use - the shape below still describes the underlying `revoke_decision()` service function and its `approval_audit_log` trail accurately, it's just not exposed over `/mcp` anymore.
 
 Backend rejects calls targeting anything other than an APPROVED item (a pending item, an already-revoked item, or an unknown id) - same "never trust the caller's claim" posture as `approve_decision`.
 

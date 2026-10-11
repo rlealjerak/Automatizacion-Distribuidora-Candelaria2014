@@ -44,7 +44,7 @@ infrastructure exists — never hardcoded.
 
 `config/openclaw.json5` configures `anthropic/claude-sonnet-5` as the
 agent's model. This isn't incidental: OpenClaw holds this backend's
-bearer token and can call `approve_decision`/`revoke_decision`, so per
+bearer token and can call `approve_decision`, so per
 `OPENCLAW_DEPLOYMENT_PLAN.md` Section 0b, model tier is a security
 control here, not just a quality choice — a frontier-tier model is used
 deliberately. If real usage ever shows it struggling with the tool-use

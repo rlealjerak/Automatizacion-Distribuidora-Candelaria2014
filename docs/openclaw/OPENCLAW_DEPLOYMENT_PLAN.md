@@ -146,7 +146,11 @@ Combining the security-hardened baseline from the docs with everything decided e
         requestTimeoutMs: 20000,
         connectionTimeoutMs: 5000,
         headers: { Authorization: "Bearer ${CANDELARIA_BACKEND_TOKEN}" },
-        toolFilter: { include: ["list_queue", "approve_decision", "reorder_queue", "revoke_decision"] },
+        // revoke_decision was briefly included here 2026-10-09, removed
+        // 2026-10-11 - admin REST only now (POST /approvals/{id}/revoke),
+        // since no per-user Telegram identity is threaded through MCP
+        // yet. See CLAUDE.md.
+        toolFilter: { include: ["list_queue", "approve_decision", "reorder_queue"] },
       },
     },
   },

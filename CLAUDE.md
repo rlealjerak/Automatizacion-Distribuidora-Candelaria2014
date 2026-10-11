@@ -173,6 +173,9 @@ owner must be able to see *why*, not just the label.
 - Never hardcode credentials, ever, anywhere — always AWS Secrets Manager.
 - This system's outputs directly drive real purchase decisions —
   correctness and explainability matter more than speed of delivery.
+- `approval_audit_log` intentionally has no FK to `approval_queue`;
+  audit rows must outlive the rows they describe. Never raw-delete
+  approval rows.
 
 ## Deploy checklist
 
@@ -203,6 +206,98 @@ deploy done:
 5. Verify the specific thing that changed actually works against the
    real endpoint (not just that the service is "stable") - e.g. a real
    authenticated request, not just a health check.
+
+---
+
+## Current status (updated 2026-10-11 — short codes, Spanish reminders, immediate notice; built, NOT deployed)
+
+**Everything below is built, tested, committed on branch
+`feat/short-codes-spanish-reminders-initial-notice`, and reviewed via
+rendered output - but deliberately not built into an image or deployed.
+Explicit instruction this round: "don't deploy until I approve."**
+
+**Short codes.** New `approval_queue.short_code` column (e.g. `D0001`),
+backed by a real Postgres `SEQUENCE` (never a `max()+1` computed in
+application code - sequential, unique, never reused even under
+concurrent inserts), additive migration `8f3b1c2d4e67`. `resolve_active_item`/
+`revoke_decision`/`reorder_queue` all now accept either the short code
+or the real UUID via a new `_resolve_approval_id()` - the UUID stays
+the only internal key past that point. `list_queue`'s MCP output
+includes `short_code` too.
+
+**Reminder text rebuilt in Spanish**, per explicit field-by-field
+approval: short code instead of the UUID; `/aprobar_<code>` /
+`/rechazar_<code>` (underscore, not a space - Telegram renders
+`/word_with_underscores` as a tappable link, plain text wouldn't be);
+units/case pack and capital required (`unit_cost * case_quantity`)
+shown when the data exists; profit explicitly labeled **per unit**
+(confirmed directly from engine.py's math, not assumed).
+
+**UPDATE, same day:** `Motivo`'s English leak (flagged here originally)
+is fixed for real, not translated after the fact - new
+`modules/rules/reasoning_es.py`, one Spanish template per rule *code*
+(engine.py's `rule_trace` was already structured as `{rule, result,
+reasoning, inputs}`, confirmed by reading it - nothing needed to
+change there), filled from that entry's own `inputs` dict. All 13 real
+rule codes templated (`grep -n 'rule="' engine.py`, confirmed count);
+only 3 (`amazon_has_buy_box`, `seller_count_high_risk`,
+`sales_velocity`) can ever actually be the last entry for an item that
+reaches the approval queue at all, traced through every code path, not
+assumed. One real gap fixed in `engine.py` itself while building this:
+`seller_count_high_risk`'s trace entry wasn't passing `seller_count`
+into its own `inputs` dict even though the value was available right
+there - the Spanish template needed a real number, not a guess.
+Percentage formatting (`format_pct_es`: comma decimal, space before
+"%", e.g. `35,0 %`) applied consistently to both the Motivo line and
+the top ROI/Margen summary line, not just where the worked example
+happened to show it. No Spanish-language client brief document exists
+anywhere in this repo (searched directly) - wording is this file's own
+English business-rules table, translated sensibly, not a client-
+approved Spanish source; said so rather than claiming otherwise.
+
+**The immediate "Nueva decisión pendiente" message, built for real.**
+Closes the gap flagged in the 2026-10-10 entry below: new
+`approval_queue.initial_notice_sent_at` column (same migration) - NULL
+means not sent yet, checked by `reminder_job.py` *before* any
+reminder-timing logic, so an item that just became active gets this on
+the very next 1-minute poll regardless of elapsed time. Same
+send-then-record discipline as reminders: never marked sent on a
+failed Telegram call. Same message body as a reminder, minus the
+"(Recordatorio N/6)" footer. The existing 5-min/10-min reminder timing
+is unchanged and sits entirely after this.
+
+**`revoke_decision` pulled back out of OpenClaw's MCP surface** (it
+briefly existed there 2026-10-09–11) - admin REST only now
+(`POST /approvals/{id}/revoke`), per explicit decision: the fixed
+`"openclaw-telegram-client"` audit actor (no per-Telegram-user identity
+is threaded through MCP) is an accepted, known limitation for a demo,
+not something to paper over by hiding the tool behind OpenClaw's own
+config alone - removed from the backend's MCP registration itself,
+`openclaw/config/openclaw.json5`'s `toolFilter.include`, and both spec
+docs. `openclaw/workspace/AGENTS.md` now tells the agent to route an
+undo request to the owner directly rather than attempt one.
+
+**Synthetic PRUEBA test items exist in real prod**, created through the
+real service layer (not raw SQL) for live bot-testing: `D....`-coded
+items under a dedicated "PRUEBA Test Supplier" (2 `BUY`, 1 `HIGH_RISK`).
+**Deliberately left in place, not deleted** - the owner will reject them
+through the bot as part of testing; raw `DELETE`s in prod were
+explicitly ruled out in favor of a future `is_test` flag or cleanup
+endpoint. Confirmed while discussing this: `approval_audit_log.approval_id`
+has **no foreign key** to `approval_queue` (deliberately, so a rejected
+call against an unknown id can still be logged) - a raw delete of these
+rows would not fail, it would silently orphan any audit rows referencing
+them. No audit rows reference them yet (no approve/revoke call has been
+made against them), so this is currently moot, but will matter the
+moment someone acts on them before any cleanup.
+
+188/188 tests pass (159 prior + 29 new, including a dedicated
+`test_reasoning_es.py` covering all 13 rule templates individually),
+migration
+`upgrade → downgrade → upgrade` cycle verified locally. **Still open:**
+this branch isn't merged, no image has been built from it, nothing is
+deployed - waiting on review of the three rendered examples (new BUY,
+new HIGH_RISK, reminder 2/6) sent this session.
 
 ---
 

@@ -25,8 +25,9 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy.orm import Session
 
 from adc_backend.db.base import get_sessionmaker
-from adc_backend.modules.approvals.models import ApprovalStatus
+from adc_backend.modules.approvals.models import ApprovalQueue, ApprovalStatus
 from adc_backend.modules.approvals.service import list_queue
+from adc_backend.modules.rules.reasoning_es import format_pct_es
 from adc_backend.telegram_notifier import TelegramNotifier, TelegramNotifierError
 
 logging.basicConfig(level=logging.INFO)
@@ -46,15 +47,105 @@ _REMINDER_STATUS_BY_COUNT = {
     6: ApprovalStatus.REMINDER_6,
 }
 
+# The business is Spanish-speaking (Distribuidora Candelaria 2014) -
+# only the two classifications that ever reach the approval queue
+# (modules/approvals/service.py::APPROVAL_GATED_LABELS) need a mapping.
+_RECOMMENDATION_ES = {
+    "buy": "COMPRAR",
+    "high_risk": "COMPRA DE ALTO RIESGO (revisar con cuidado antes de decidir)",
+}
+
+
+def _build_message_text(item: ApprovalQueue, reminder_count: int | None) -> str:
+    """
+    Spanish-language message, built directly from `summary_payload`'s
+    structured fields - deliberately NOT `item.summary` (English,
+    meant for internal/audit use - see service.py::_build_summary) - so
+    the two never get mixed.
+
+    `reminder_count=None` renders the one-time "Nueva decisión
+    pendiente" notice (see check_and_send_reminder) - same body, no
+    "(Recordatorio N/6)" footer. Any int 1-6 renders a numbered reminder
+    with the "Decisión pendiente" header instead. Decided 2026-10-11.
+
+    Short code (e.g. "D0001"), not the UUID, both in the header and in
+    the reply commands - and formatted as `/aprobar_<code>` /
+    `/rechazar_<code>` specifically (underscore, not a space) because
+    Telegram renders a `/word_with_underscores` command as a tappable
+    link; `/aprobar <code>` as free text would not be.
+    """
+    payload = item.summary_payload or {}
+    product = payload.get("description") or "(sin descripción)"
+    if payload.get("brand"):
+        product = f"{product} ({payload['brand']})"
+    supplier = payload.get("supplier_name") or "(proveedor desconocido)"
+    recommendation = _RECOMMENDATION_ES.get(payload.get("classification"), (payload.get("classification") or "").upper())
+
+    header = "Nueva decisión pendiente" if reminder_count is None else "Decisión pendiente"
+    lines = [
+        f"{header} (ID: {item.short_code})",
+        "",
+        f"Producto: {product}",
+        f"Proveedor: {supplier}",
+        f"Recomendación: {recommendation}",
+    ]
+    if payload.get("roi_pct") is not None and payload.get("margin_pct") is not None:
+        # Spanish-locale percentage formatting (comma decimal, space
+        # before "%"), same convention as the Motivo line below -
+        # applied here too for consistency within one message, not
+        # just where the worked example happened to show it.
+        lines.append(f"ROI: {format_pct_es(payload['roi_pct'])} | Margen: {format_pct_es(payload['margin_pct'])}")
+    if payload.get("case_quantity") and payload.get("case_unit"):
+        lines.append(f"Presentación: {payload['case_quantity']} {payload['case_unit']}")
+    if payload.get("capital_required") is not None:
+        unit_label = f" ({payload['case_quantity']} {payload['case_unit']})" if payload.get("case_quantity") else ""
+        lines.append(f"Capital requerido{unit_label}: ${payload['capital_required']}")
+    if payload.get("profit") is not None:
+        # Confirmed per-unit, not total - see service.py::create_from_classification's comment.
+        lines.append(f"Ganancia estimada por unidad: ${payload['profit']}")
+    if payload.get("motivo"):
+        lines.append(f"Motivo: {payload['motivo']}")
+
+    lines += [
+        "",
+        f"Para decidir, responde: /aprobar_{item.short_code} o /rechazar_{item.short_code}",
+    ]
+    if reminder_count is not None:
+        lines += ["", f"(Recordatorio {reminder_count}/{MAX_REMINDERS})"]
+    return "\n".join(lines)
+
 
 def check_and_send_reminder(db: Session, notifier: TelegramNotifier, now: datetime) -> str:
     """
     Returns a short outcome string for logging/testing: "no_active_item",
-    "not_due", "reminder_sent:N", "holding", or "send_failed".
+    "initial_notice_sent", "not_due", "reminder_sent:N", "holding", or
+    "send_failed".
+
+    The one-time "Nueva decisión pendiente" notice (initial_notice_sent_at
+    IS NULL) is checked and sent *before* any reminder-timing logic -
+    an item that just became active should hear about it on this very
+    next poll, regardless of how long it's been pending. Same
+    send-then-record discipline as reminders below: never marked sent
+    on a failed Telegram call, so a transient failure retries next
+    minute rather than silently skipping the client's only notice of a
+    new decision. Decided 2026-10-11, closing the gap where the client's
+    first-ever notice of a new item was a message literally labeled
+    "Reminder (1/6)" of something that had never actually been announced.
     """
     item, _queued = list_queue(db)
     if item is None:
         return "no_active_item"
+
+    if item.initial_notice_sent_at is None:
+        try:
+            notifier.send_reminder(_build_message_text(item, reminder_count=None))
+        except TelegramNotifierError as e:
+            logger.error("Initial notice send failed for approval item %s, will retry next run: %s", item.id, e)
+            return "send_failed"
+        item.initial_notice_sent_at = now
+        db.flush()
+        logger.info("Sent initial notice for approval item %s (%s)", item.id, item.short_code)
+        return "initial_notice_sent"
 
     if item.status == ApprovalStatus.HOLDING:
         return "not_due"  # holding is terminal-until-client-replies - never re-checked into a message
@@ -75,9 +166,7 @@ def check_and_send_reminder(db: Session, notifier: TelegramNotifier, now: dateti
 
     next_count = item.reminder_count + 1
     try:
-        notifier.send_reminder(
-            f"Reminder ({next_count}/{MAX_REMINDERS}) - awaiting your approval:\n\n{item.summary}"
-        )
+        notifier.send_reminder(_build_message_text(item, reminder_count=next_count))
     except TelegramNotifierError as e:
         # Do NOT advance reminder_count/last_reminder_at on a failed send -
         # the client would silently miss a reminder while the clock kept
