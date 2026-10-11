@@ -57,6 +57,7 @@ resource "aws_iam_role_policy" "scheduler_run_task" {
 resource "aws_scheduler_schedule" "reminder_job" {
   name                = "${var.project_name}-${var.environment}-reminder-job"
   schedule_expression = var.schedule_expression
+  state               = var.state
 
   flexible_time_window {
     mode = "OFF"

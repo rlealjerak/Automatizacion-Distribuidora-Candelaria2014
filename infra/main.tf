@@ -155,6 +155,7 @@ module "eventbridge_scheduler" {
 
   project_name = var.project_name
   environment  = var.environment
+  state        = "DISABLED" # see the module variable's own comment - re-enable only after review
 
   cluster_arn                 = module.ecs_cluster.cluster_arn
   task_definition_arn         = module.ecs_cluster.reminder_job_task_definition_arn
