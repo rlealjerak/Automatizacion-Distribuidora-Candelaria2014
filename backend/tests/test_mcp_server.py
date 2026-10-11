@@ -205,19 +205,27 @@ class TestMcpToolsRoundTrip:
         assert result["ok"] is False
         assert "active_approval_id" in result
 
-    def test_revoke_decision_on_approved_item_succeeds(self, client, db_session):
+    def test_revoke_decision_is_not_exposed_to_openclaw(self, client):
+        # Decided 2026-10-11: admin REST only (modules/tools/router.py) -
+        # not the Telegram-facing MCP surface, since no per-user identity
+        # is threaded through here yet.
+        client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}}},
+            headers={"Accept": "application/json, text/event-stream"},
+        )
+        response = client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            headers={"Accept": "application/json, text/event-stream"},
+        )
+        assert response.status_code == 200
+        tool_names = {t["name"] for t in response.json()["result"]["tools"]}
+        assert tool_names == {"list_queue", "approve_decision", "reorder_queue"}
+
+    def test_list_queue_includes_short_code(self, client, db_session):
         item = self._seed_buy_item(db_session)
-        self._call(client, "approve_decision", {"approval_id": str(item.id), "resolution": "approved"})
-
-        response, result = self._call(client, "revoke_decision", {"approval_id": str(item.id), "reason": "client changed their mind"})
+        response, result = self._call(client, "list_queue", {})
         assert response.status_code == 200
-        assert result["ok"] is True
-        assert result["approval_id"] == str(item.id)
-        assert result["new_status"] == "pending"  # queue was empty, so it becomes active again
-
-    def test_revoke_decision_on_pending_item_returns_error_shape(self, client, db_session):
-        item = self._seed_buy_item(db_session)  # never approved - still pending
-        response, result = self._call(client, "revoke_decision", {"approval_id": str(item.id), "reason": "oops"})
-        assert response.status_code == 200
-        assert result["ok"] is False
-        assert "error" in result
+        assert result["active_item"]["short_code"] == item.short_code
+        assert result["active_item"]["short_code"].startswith("D")
