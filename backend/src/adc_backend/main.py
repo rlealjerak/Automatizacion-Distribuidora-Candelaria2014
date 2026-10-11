@@ -10,6 +10,7 @@ For now it only exposes a health check — routes get added as each module
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -64,7 +65,17 @@ app = FastAPI(
 async def health() -> dict:
     # Deliberately unauthenticated - the ALB target group health check
     # hits this with no headers, and it exposes nothing sensitive.
-    return {"status": "ok"}
+    #
+    # `commit` added 2026-10-10 after discovering the deployed image had
+    # drifted ~1.5 months behind `main` with nobody noticing (the MCP
+    # server was merged and "documented as live" while the running
+    # container actually predated it entirely) - baked in at build time
+    # via the Dockerfile's GIT_SHA build arg, "unknown" only in local dev
+    # where that arg isn't passed. A single `curl /health` now answers
+    # "is this actually running what I think it's running" without
+    # needing to cross-reference ECS task definitions or ECR image
+    # digests by hand.
+    return {"status": "ok", "commit": os.environ.get("GIT_SHA", "unknown")}
 
 
 # Every route below requires X-Api-Key - see modules/auth.py for why this

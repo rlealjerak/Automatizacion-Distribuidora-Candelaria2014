@@ -6,4 +6,8 @@ def test_health_returns_ok(app_client):
     response = app_client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    body = response.json()
+    assert body["status"] == "ok"
+    # "unknown" in local dev/test (no GIT_SHA build arg) - a real deploy
+    # bakes in the actual commit, see Dockerfile.
+    assert "commit" in body

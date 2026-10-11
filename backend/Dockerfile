@@ -21,6 +21,17 @@ COPY alembic.ini ./
 COPY entrypoint.sh ./
 RUN chmod +x entrypoint.sh
 
+# Baked in at build time, read by /health (main.py) - lets a single curl
+# answer "is this actually running what's on main" without
+# cross-referencing ECS task definitions or ECR digests by hand. Added
+# 2026-10-10 after the deployed image was found to have drifted ~1.5
+# months behind main with nobody noticing. Pass with
+# `--build-arg GIT_SHA=$(git rev-parse HEAD)` - defaults to "unknown"
+# if omitted (e.g. local `docker build` without it), never silently a
+# fake-looking value.
+ARG GIT_SHA=unknown
+ENV GIT_SHA=${GIT_SHA}
+
 EXPOSE 8000
 
 # Runs migrations + seeds the default rules config (both idempotent, safe
