@@ -206,6 +206,83 @@ deploy done:
 
 ---
 
+## Current status (updated 2026-10-11 — short codes, Spanish reminders, immediate notice; built, NOT deployed)
+
+**Everything below is built, tested, committed on branch
+`feat/short-codes-spanish-reminders-initial-notice`, and reviewed via
+rendered output - but deliberately not built into an image or deployed.
+Explicit instruction this round: "don't deploy until I approve."**
+
+**Short codes.** New `approval_queue.short_code` column (e.g. `D0001`),
+backed by a real Postgres `SEQUENCE` (never a `max()+1` computed in
+application code - sequential, unique, never reused even under
+concurrent inserts), additive migration `8f3b1c2d4e67`. `resolve_active_item`/
+`revoke_decision`/`reorder_queue` all now accept either the short code
+or the real UUID via a new `_resolve_approval_id()` - the UUID stays
+the only internal key past that point. `list_queue`'s MCP output
+includes `short_code` too.
+
+**Reminder text rebuilt in Spanish**, per explicit field-by-field
+approval: short code instead of the UUID; `/aprobar_<code>` /
+`/rechazar_<code>` (underscore, not a space - Telegram renders
+`/word_with_underscores` as a tappable link, plain text wouldn't be);
+`Motivo:` pulled from `rule_trace[-1]["reasoning"]` (confirmed general,
+not guessed - engine.py's `classify()` only reaches BUY/HIGH_RISK by
+falling through to its final trace append, whichever rule that is);
+units/case pack and capital required (`unit_cost * case_quantity`)
+shown when the data exists; profit explicitly labeled **per unit**
+(confirmed directly from engine.py's math, not assumed). **Known,
+flagged limitation, not silently shipped:** `Motivo` is still in
+English on a HIGH_RISK item, because it's pulled verbatim from
+engine.py's hardcoded English reasoning strings - a real Spanish
+translation would need per-rule templates (the strings carry
+interpolated values), not a simple lookup table, and wasn't built this
+round.
+
+**The immediate "Nueva decisión pendiente" message, built for real.**
+Closes the gap flagged in the 2026-10-10 entry below: new
+`approval_queue.initial_notice_sent_at` column (same migration) - NULL
+means not sent yet, checked by `reminder_job.py` *before* any
+reminder-timing logic, so an item that just became active gets this on
+the very next 1-minute poll regardless of elapsed time. Same
+send-then-record discipline as reminders: never marked sent on a
+failed Telegram call. Same message body as a reminder, minus the
+"(Recordatorio N/6)" footer. The existing 5-min/10-min reminder timing
+is unchanged and sits entirely after this.
+
+**`revoke_decision` pulled back out of OpenClaw's MCP surface** (it
+briefly existed there 2026-10-09–11) - admin REST only now
+(`POST /approvals/{id}/revoke`), per explicit decision: the fixed
+`"openclaw-telegram-client"` audit actor (no per-Telegram-user identity
+is threaded through MCP) is an accepted, known limitation for a demo,
+not something to paper over by hiding the tool behind OpenClaw's own
+config alone - removed from the backend's MCP registration itself,
+`openclaw/config/openclaw.json5`'s `toolFilter.include`, and both spec
+docs. `openclaw/workspace/AGENTS.md` now tells the agent to route an
+undo request to the owner directly rather than attempt one.
+
+**Synthetic PRUEBA test items exist in real prod**, created through the
+real service layer (not raw SQL) for live bot-testing: `D....`-coded
+items under a dedicated "PRUEBA Test Supplier" (2 `BUY`, 1 `HIGH_RISK`).
+**Deliberately left in place, not deleted** - the owner will reject them
+through the bot as part of testing; raw `DELETE`s in prod were
+explicitly ruled out in favor of a future `is_test` flag or cleanup
+endpoint. Confirmed while discussing this: `approval_audit_log.approval_id`
+has **no foreign key** to `approval_queue` (deliberately, so a rejected
+call against an unknown id can still be logged) - a raw delete of these
+rows would not fail, it would silently orphan any audit rows referencing
+them. No audit rows reference them yet (no approve/revoke call has been
+made against them), so this is currently moot, but will matter the
+moment someone acts on them before any cleanup.
+
+170/170 tests pass (159 prior + 11 new), migration
+`upgrade → downgrade → upgrade` cycle verified locally. **Still open:**
+this branch isn't merged, no image has been built from it, nothing is
+deployed - waiting on review of the three rendered examples (new BUY,
+new HIGH_RISK, reminder 2/6) sent this session.
+
+---
+
 ## Current status (updated 2026-10-10 — v5/v6 deploy: real image drift found and fixed)
 
 **The MCP server, approval queue, and revoke path - all merged into
