@@ -17,6 +17,7 @@ def _state(**overrides) -> LineItemReviewState:
         match_confidence=0.95,
         classification=ClassificationLabel.BUY,
         classification_trace=None,
+        candidate_asins=None,
     )
     defaults.update(overrides)
     return LineItemReviewState(**defaults)
@@ -118,3 +119,26 @@ def test_buy_classification_with_confirmed_match_needs_no_review():
     assert determine_review_reason(_state(classification=ClassificationLabel.BUY)) is None
 
     assert determine_review_reason(_state(classification=ClassificationLabel.HIGH_RISK)) is None
+
+
+def test_multiple_upc_candidates_gets_specific_reason_not_generic_low_confidence():
+    reason, notes = determine_review_reason(
+        _state(
+            match_status=MatchStatus.PROPOSED,
+            match_confidence=None,
+            classification=None,
+            candidate_asins=["B0FIRST", "B0SECOND"],
+        )
+    )
+    assert reason == ReviewReason.MULTIPLE_UPC_MATCHES
+    assert "B0FIRST" in notes
+    assert "B0SECOND" in notes
+
+
+def test_multiple_upc_candidates_takes_priority_over_generic_low_confidence_check():
+    # Both conditions are technically true (PROPOSED + no confidence) -
+    # the specific UPC reason must win, not the generic fallback.
+    reason, _ = determine_review_reason(
+        _state(match_status=MatchStatus.PROPOSED, match_confidence=None, classification=None, candidate_asins=["B0A", "B0B"])
+    )
+    assert reason == ReviewReason.MULTIPLE_UPC_MATCHES

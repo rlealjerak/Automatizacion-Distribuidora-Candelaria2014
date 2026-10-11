@@ -75,21 +75,45 @@ def process_run(db: Session, run_id: uuid.UUID, sp_api_client, keepa_client) -> 
             item.parse_status = ParseStatus.ERROR
             item.parse_notes = (item.parse_notes or "") + " | Processing failed - see server logs."
             error_count += 1
-        finally:
+
+        try:
+            # Its own try/except, not a `finally` on the block above
+            # (fixed 2026-10-11, found live on the real 20-row MTZ
+            # re-run): a `finally` runs outside that except's
+            # protection, so a failure in evaluate_and_route itself used
+            # to propagate past this entire loop and abort the whole
+            # run - exactly the "one bad row fails everything" failure
+            # mode CLAUDE.md's per-row isolation requirement exists to
+            # prevent. Confirmed for real: a genuine NOT_ELIGIBLE
+            # restriction on a real ASIN hit a pre-existing enum-casing
+            # bug in review routing's DB write, which previously would
+            # have killed every row after it in the run.
             review_entry = evaluate_and_route(db, run_id, item.id)
             if review_entry is not None:
                 review_count += 1
+        except Exception:
+            logger.exception("Review routing failed for raw_line_item %s in run %s", item.id, run_id)
+            error_count += 1
 
     run.processed_rows = processed_count
     run.error_rows = error_count
     run.status = ListRunStatus.PARTIAL if error_count > 0 else ListRunStatus.COMPLETED
     db.flush()
 
+    # sp_api_client.throttle_retry_count accumulates across the whole run
+    # (same client instance for every row) - exposed so a caller can
+    # answer "how many retries did this run need" without digging through
+    # logs (added 2026-10-11, alongside the retry/backoff itself in
+    # sp_api_client.py). 0 if the client never throttled, or doesn't
+    # support the attribute at all (e.g. a stub in tests).
+    throttle_retries = getattr(sp_api_client, "throttle_retry_count", 0)
+
     return {
         "total_rows": len(items),
         "processed_rows": processed_count,
         "error_rows": error_count,
         "review_queue_rows": review_count,
+        "sp_api_throttle_retries": throttle_retries,
     }
 
 
@@ -109,6 +133,7 @@ def _process_one_item(db: Session, run: ListRun, item: RawLineItem, sp_api_clien
         supplier_item_number=item.supplier_item_number,
         description=item.description or "",
         brand=item.brand,
+        upc=item.upc,
     )
     item.product_match_id = match.id
     db.flush()

@@ -52,6 +52,11 @@ class RawLineItem(Base):
 
     # Normalized fields - best-effort, per confirmed column mapping.
     supplier_item_number: Mapped[str | None]  # join key for the persistent ASIN mapping
+    # Its own field, deliberately never mapped as supplier_item_number
+    # (added 2026-10-11 - see modules/matching/upc.py/engine.py). Stored
+    # as given; check-digit validation happens at match time, not here,
+    # so an invalid value is still visible/debuggable rather than silently dropped.
+    upc: Mapped[str | None]
     description: Mapped[str | None] = mapped_column(Text)
     brand: Mapped[str | None]
     unit_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))

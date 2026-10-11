@@ -33,6 +33,9 @@ class LineItemReviewState:
     match_confidence: float | None
     classification: ClassificationLabel | None  # None if not classified yet (e.g. bundle/promo skip the rule engine)
     classification_trace: list[dict] | None
+    # Populated only when a UPC/EAN lookup found more than one ASIN for
+    # the same barcode (added 2026-10-11) - see ProductMatch.candidate_asins.
+    candidate_asins: list[str] | None = None
 
 
 def determine_review_reason(state: LineItemReviewState) -> tuple[ReviewReason, str] | None:
@@ -52,6 +55,16 @@ def determine_review_reason(state: LineItemReviewState) -> tuple[ReviewReason, s
         # item now has no usable match at all, full stop, regardless of
         # what the discarded suggestion used to score.
         return ReviewReason.LOW_CONFIDENCE_MATCH, "Previous ASIN match was rejected - needs a new match before this can be classified."
+
+    if state.match_status == MatchStatus.PROPOSED and state.candidate_asins:
+        # Checked before the generic low-confidence case below: there's no
+        # fuzzy score to report here at all - a UPC/EAN lookup resolved to
+        # multiple real ASINs for the same barcode, so the owner needs to
+        # pick one directly rather than see a misleading "no match found".
+        return (
+            ReviewReason.MULTIPLE_UPC_MATCHES,
+            f"UPC/EAN lookup matched {len(state.candidate_asins)} ASINs: {', '.join(state.candidate_asins)}.",
+        )
 
     if state.match_status == MatchStatus.PROPOSED and (
         state.match_confidence is None or state.match_confidence < LOW_CONFIDENCE_REVIEW_THRESHOLD
