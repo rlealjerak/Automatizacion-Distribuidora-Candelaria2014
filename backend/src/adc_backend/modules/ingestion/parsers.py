@@ -130,9 +130,34 @@ def parse_excel(content: bytes) -> ParseResult:
             f"({', '.join(workbook.sheetnames)}) - only the first (active) sheet was parsed"
         )
     sheet = workbook[workbook.sheetnames[0]]
-    grid = [list(row) for row in sheet.iter_rows(values_only=True)]
+    grid = [[_excel_cell_value(cell) for cell in row] for row in sheet.iter_rows()]
     headers, rows = _rows_from_grid(grid, warnings)
     return ParseResult(headers=headers, rows=rows, warnings=warnings)
+
+
+def _excel_cell_value(cell):
+    """
+    A cell's value as the spreadsheet actually *displays* it, for the one
+    case where the raw stored value and the display genuinely differ in a
+    way that matters downstream: a numeric cell with an all-zeros number
+    format (e.g. `000000000000`), the standard way Excel keeps a UPC's
+    leading zero visible. openpyxl returns the bare int (22548419953), so
+    without this a real 12-digit UPC-A like 022548419953 reached UPC
+    validation as 11 digits and silently fell back to fuzzy matching
+    (Codex review on PR #14). Every other cell is returned unchanged -
+    this layer still doesn't normalize anything else.
+    """
+    value = cell.value
+    number_format = getattr(cell, "number_format", None) or ""
+    if (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and float(value).is_integer()
+        and number_format
+        and set(number_format) == {"0"}
+    ):
+        return str(int(value)).zfill(len(number_format))
+    return value
 
 
 def parse_pdf(content: bytes) -> ParseResult:

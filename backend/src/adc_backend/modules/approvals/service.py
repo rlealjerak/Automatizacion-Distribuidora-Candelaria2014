@@ -222,6 +222,17 @@ def create_from_classification(db: Session, classification_result_id: uuid.UUID)
     if result.classification not in APPROVAL_GATED_LABELS:
         return None
 
+    # One approval item per classification result, ever (added
+    # 2026-11-14): a re-processed run upserts the same
+    # ClassificationResult row (rules/service.py), and without this check
+    # each re-run queued the same product for approval again - the
+    # client would be asked to approve one purchase twice.
+    already_queued = db.execute(
+        select(ApprovalQueue).where(ApprovalQueue.analysis_result_ref == result.id)
+    ).scalars().first()
+    if already_queued is not None:
+        return already_queued
+
     line_item = db.get(RawLineItem, result.raw_line_item_id)
     list_run = db.get(ListRun, result.list_run_id)
     supplier = db.get(Supplier, list_run.supplier_id)
@@ -572,3 +583,67 @@ def reorder_queue(db: Session, approval_id: str) -> ApprovalQueue:
     item.queue_position = 1
     db.flush()
     return item
+
+
+_UNRESOLVED_STATUSES = (
+    ApprovalStatus.QUEUED,
+    ApprovalStatus.PENDING,
+    ApprovalStatus.REMINDER_1,
+    ApprovalStatus.REMINDER_2,
+    ApprovalStatus.REMINDER_3,
+    ApprovalStatus.REMINDER_4,
+    ApprovalStatus.REMINDER_5,
+    ApprovalStatus.REMINDER_6,
+    ApprovalStatus.HOLDING,
+)
+
+
+def withdraw_test_supplier_items(db: Session, supplier_id: uuid.UUID, actor: str) -> list[ApprovalQueue]:
+    """
+    Takes every unresolved approval item from a supplier flagged is_test
+    out of the client's queue (added 2026-11-14) - the PRUEBA items
+    created in prod for bot testing must never be what the client's first
+    real Telegram notice is about. Not a delete: CLAUDE.md forbids
+    raw-deleting approval rows, so each item is resolved DENIED with an
+    explicit note and one audit-log row, exactly like a real denial,
+    and stays in the table as history. The caller is responsible for
+    checking the supplier really is a test supplier - this function
+    doesn't re-check, so it stays usable from tests and admin tooling.
+    """
+    items = list(
+        db.execute(
+            select(ApprovalQueue)
+            .join(ClassificationResult, ClassificationResult.id == ApprovalQueue.analysis_result_ref)
+            .join(ListRun, ListRun.id == ClassificationResult.list_run_id)
+            .where(ListRun.supplier_id == supplier_id, ApprovalQueue.status.in_(_UNRESOLVED_STATUSES))
+        ).scalars()
+    )
+    if not items:
+        return []
+
+    note = "Withdrawn: synthetic test item from a test supplier, not a real purchase recommendation."
+    now = datetime.now(UTC)
+    for item in items:
+        item.is_active_item = False
+        item.queue_position = None
+        item.status = ApprovalStatus.DENIED
+        item.resolution = ApprovalResolution.DENIED
+        item.resolved_at = now
+        item.resolution_note = note
+    # Same flush-before-advance ordering as resolve_active_item, for the
+    # same one-active-item unique index reason.
+    db.flush()
+
+    for position, remaining in enumerate(_get_queued_items_ordered(db), start=1):
+        remaining.queue_position = position
+    db.flush()
+    if _get_active_item(db) is None:
+        _advance_queue(db)
+        db.flush()
+
+    for item in items:
+        _log_audit_event(
+            db, approval_id=item.id, requested_approval_id=str(item.id), action="withdraw_test",
+            event=ApprovalAuditEvent.DENIED, ok=True, actor=actor, note=note,
+        )
+    return items

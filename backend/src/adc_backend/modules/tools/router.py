@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.responses import Response
@@ -25,16 +26,17 @@ from sqlalchemy.orm import Session
 
 from adc_backend.config import get_settings, get_sqs_client
 from adc_backend.db.base import get_db
-from adc_backend.db.core_models import ListRun, Supplier
-from adc_backend.modules.approvals.service import revoke_decision
+from adc_backend.db.core_models import ListRun, ListRunStatus, Supplier
+from adc_backend.modules.approvals.service import revoke_decision, withdraw_test_supplier_items
 from adc_backend.modules.ingestion.models import RawLineItem
 from adc_backend.modules.ingestion.service import IngestionError, ingest_file
-from adc_backend.modules.matching.engine import confirm_match, reject_match
+from adc_backend.modules.matching.engine import MatchConfirmationError, confirm_match, reject_match
 from adc_backend.modules.matching.models import ProductMatch
 from adc_backend.modules.normalization.service import (
     ConfirmedMapping,
     NormalizationError,
     confirm_mapping,
+    get_available_headers,
     propose_mapping_for_run,
 )
 from adc_backend.modules.review.models import ManualReviewQueue, ReviewStatus
@@ -56,7 +58,9 @@ from adc_backend.modules.tools.schemas import (
     ProposedFieldMapping,
     ProposedMappingOut,
     RejectMatchRequest,
+    ReprocessItemQueuedResponse,
     ResolveReviewRequest,
+    RetireTestSupplierRequest,
     RevokeApprovalRequest,
     RunComparisonOut,
     RunComparisonRow,
@@ -83,6 +87,31 @@ def create_supplier(body: SupplierCreate, db: Session = Depends(get_db)):
 @router.get("/suppliers", response_model=list[SupplierOut])
 def list_suppliers(db: Session = Depends(get_db)):
     return db.execute(select(Supplier).order_by(Supplier.name)).scalars().all()
+
+
+@router.post("/suppliers/{supplier_id}/retire-test")
+def retire_test_supplier(supplier_id: uuid.UUID, body: RetireTestSupplierRequest, db: Session = Depends(get_db)):
+    """
+    Flags a synthetic test supplier (the PRUEBA/Goal1 ones created in
+    prod) as is_test + inactive, and withdraws any of its unresolved
+    approval items from the client's queue through the audited service
+    path (added 2026-11-14). `confirm_code` must repeat the supplier's
+    own code - a typo'd id can't silently retire a real supplier.
+    """
+    supplier = db.get(Supplier, supplier_id)
+    if supplier is None:
+        raise HTTPException(status_code=404, detail="Supplier not found")
+    if body.confirm_code != supplier.code:
+        raise HTTPException(status_code=400, detail="confirm_code does not match this supplier's code")
+    supplier.is_test = True
+    supplier.is_active = False
+    withdrawn = withdraw_test_supplier_items(db, supplier_id, actor=body.retired_by)
+    db.commit()
+    return {
+        "supplier_id": str(supplier.id),
+        "is_test": True,
+        "withdrawn_approvals": [{"approval_id": str(i.id), "short_code": i.short_code} for i in withdrawn],
+    }
 
 
 # --- ingestion (step 3) ---
@@ -125,7 +154,8 @@ def get_proposed_mapping(run_id: uuid.UUID, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail=str(e)) from e
     db.commit()
     mapping = {field: ProposedFieldMapping(**value) for field, value in run.proposed_column_mapping.items()}
-    return ProposedMappingOut(run_id=run_id, mapping=mapping)
+    available_headers = get_available_headers(db, run_id)
+    return ProposedMappingOut(run_id=run_id, mapping=mapping, available_headers=available_headers)
 
 
 @router.post("/runs/{run_id}/mapping/confirm", response_model=ListRunOut)
@@ -137,6 +167,7 @@ def confirm_run_mapping(run_id: uuid.UUID, body: ConfirmMappingRequest, db: Sess
         unit_price=body.unit_price,
         case_quantity=body.case_quantity,
         case_unit=body.case_unit,
+        upc=body.upc,
     )
     try:
         run = confirm_mapping(db, run_id, mapping, confirmed_by=body.confirmed_by)
@@ -170,6 +201,13 @@ def process_run_endpoint(run_id: uuid.UUID, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Run not found")
     if run.confirmed_column_mapping is None:
         raise HTTPException(status_code=400, detail=f"list_run {run_id} has no confirmed column mapping - can't process")
+    if run.status == ListRunStatus.PROCESSING and _worker_recently_active(run):
+        # A second message while the worker is mid-run would, once the
+        # first finishes, start a full from-scratch reprocess - hours of
+        # duplicate rate-limited API calls (2026-11-14). A PROCESSING run
+        # with no recent checkpoint is treated as interrupted and *is*
+        # re-enqueued: the worker resumes it from its last checkpoint.
+        raise HTTPException(status_code=409, detail=f"list_run {run_id} is already being processed")
 
     settings = get_settings()
     get_sqs_client().send_message(
@@ -177,6 +215,43 @@ def process_run_endpoint(run_id: uuid.UUID, db: Session = Depends(get_db)):
         MessageBody=json.dumps({"run_id": str(run_id)}),
     )
     return ProcessRunQueuedResponse(run_id=run_id, status=run.status.value)
+
+
+# The worker checkpoints every worker.CHECKPOINT_EVERY_ROWS rows (minutes,
+# not hours, at real rate limits); a run with no progress for this
+# long is assumed to have lost its worker.
+_STALE_PROCESSING_AFTER = timedelta(minutes=15)
+
+
+def _worker_recently_active(run: ListRun) -> bool:
+    last = run.last_progress_at
+    if last is None:
+        return False
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=UTC)
+    return datetime.now(UTC) - last < _STALE_PROCESSING_AFTER
+
+
+@router.post(
+    "/runs/{run_id}/items/{item_id}/reprocess", response_model=ReprocessItemQueuedResponse, status_code=202
+)
+def reprocess_item_endpoint(run_id: uuid.UUID, item_id: uuid.UUID, db: Session = Depends(get_db)):
+    """
+    Enqueues one row for re-processing (added 2026-11-14) - the step
+    after POST /matches/{match_id}/confirm, so a row whose ASIN the owner
+    just picked (e.g. from several UPC candidates) gets real live data and
+    a classification. Async via the same SQS worker, not inline: a Keepa
+    token wait alone can outlast an ALB request timeout.
+    """
+    item = db.get(RawLineItem, item_id)
+    if item is None or item.list_run_id != run_id:
+        raise HTTPException(status_code=404, detail="Line item not found in this run")
+    settings = get_settings()
+    get_sqs_client().send_message(
+        QueueUrl=settings.sqs_queue_url,
+        MessageBody=json.dumps({"run_id": str(run_id), "raw_line_item_id": str(item_id)}),
+    )
+    return ReprocessItemQueuedResponse(run_id=run_id, raw_line_item_id=item_id)
 
 
 # --- results (owner review surface) ---
@@ -212,7 +287,9 @@ def get_run_results(run_id: uuid.UUID, classification: str | None = None, db: Se
                 unit_price=item.unit_price,
                 item_type=item.item_type.value,
                 parse_status=item.parse_status.value,
+                product_match_id=match.id if match else None,
                 asin=match.asin if match else None,
+                candidate_asins=match.candidate_asins if match else None,
                 match_confidence=float(match.match_confidence) if match and match.match_confidence is not None else None,
                 match_status=match.match_status.value if match else None,
                 classification=result.classification.value if result else None,
@@ -249,10 +326,25 @@ def get_review_queue(run_id: uuid.UUID, db: Session = Depends(get_db)):
     entries = db.execute(
         select(ManualReviewQueue).where(ManualReviewQueue.list_run_id == run_id, ManualReviewQueue.status == ReviewStatus.PENDING)
     ).scalars().all()
+    # The match id + candidates are what make a review entry actionable
+    # (Codex review on PR #14): POST /matches/{match_id}/confirm needs the
+    # id, and a multi-UPC entry needs its candidate ASINs to pick from.
+    item_ids = [e.raw_line_item_id for e in entries]
+    items = {i.id: i for i in db.execute(select(RawLineItem).where(RawLineItem.id.in_(item_ids))).scalars()} if item_ids else {}
+    match_ids = [i.product_match_id for i in items.values() if i.product_match_id]
+    matches = {m.id: m for m in db.execute(select(ProductMatch).where(ProductMatch.id.in_(match_ids))).scalars()} if match_ids else {}
+
+    def _match_for(entry):
+        item = items.get(entry.raw_line_item_id)
+        return matches.get(item.product_match_id) if item and item.product_match_id else None
+
     return [
         {
             "id": str(e.id),
             "raw_line_item_id": str(e.raw_line_item_id),
+            "product_match_id": str(m.id) if (m := _match_for(e)) else None,
+            "proposed_asin": m.asin if m else None,
+            "candidate_asins": m.candidate_asins if m else None,
             "reason": e.reason.value,
             "reason_notes": e.reason_notes,
             "status": e.status.value,
@@ -291,6 +383,9 @@ def dismiss_review(entry_id: uuid.UUID, body: ResolveReviewRequest, db: Session 
 def confirm_match_endpoint(match_id: uuid.UUID, body: ConfirmMatchRequest, db: Session = Depends(get_db)):
     try:
         match = confirm_match(db, match_id, confirmed_by=body.confirmed_by, asin=body.asin)
+    except MatchConfirmationError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except ValueError as e:
         db.rollback()
         raise HTTPException(status_code=404, detail=str(e)) from e

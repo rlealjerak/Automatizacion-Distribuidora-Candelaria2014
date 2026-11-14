@@ -25,9 +25,11 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Callable
+from datetime import UTC, datetime
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from adc_backend.config import get_settings
@@ -37,6 +39,7 @@ from adc_backend.modules.approvals.service import create_from_classification
 from adc_backend.modules.ingestion.models import LineItemType, ParseStatus, RawLineItem
 from adc_backend.modules.matching.engine import find_or_propose_match
 from adc_backend.modules.normalization.service import apply_normalization
+from adc_backend.modules.review.models import ManualReviewQueue, ReviewStatus
 from adc_backend.modules.review.service import evaluate_and_route
 from adc_backend.modules.rules.service import RulesServiceError, classify_line_item
 
@@ -47,25 +50,74 @@ class OrchestrationError(Exception):
     """Run-level failure - couldn't even start (missing mapping, no active rules config, etc.)."""
 
 
-def process_run(db: Session, run_id: uuid.UUID, sp_api_client, keepa_client) -> dict:
+
+def process_run(
+    db: Session,
+    run_id: uuid.UUID,
+    sp_api_client,
+    keepa_client,
+    *,
+    checkpoint_every: int | None = None,
+    on_checkpoint: Callable[[ListRun], None] | None = None,
+) -> dict:
+    """
+    checkpoint_every (added 2026-11-14, for real 3,000+ row lists): when
+    set, commits every N rows and updates processed_rows/error_rows as it
+    goes, so GET /runs/{id} shows live progress and a crash/redeploy/SQS
+    redelivery resumes from the last checkpoint instead of redoing hours
+    of rate-limited API calls. Each finished row is stamped
+    `processed_at`; a run found still in PROCESSING status (i.e. it was
+    interrupted) skips stamped rows. on_checkpoint is called after each
+    commit - worker.py uses it to extend the SQS message's visibility
+    timeout so a long run isn't redelivered to itself mid-flight.
+
+    Left unset (tests, ad-hoc calls), nothing is committed here - the
+    caller owns the transaction, exactly as before.
+    """
     run = db.get(ListRun, run_id)
     if run is None:
         raise OrchestrationError(f"No list_run with id {run_id}")
     if run.confirmed_column_mapping is None:
         raise OrchestrationError(f"list_run {run_id} has no confirmed column mapping - can't process")
 
-    apply_normalization(db, run_id)
+    resuming = run.status == ListRunStatus.PROCESSING
+    if resuming:
+        error_count = run.error_rows or 0
+        processed_count = run.processed_rows or 0
+        logger.info("Resuming interrupted run %s from %s processed / %s errors", run_id, processed_count, error_count)
+    else:
+        apply_normalization(db, run_id)  # also flips status to PROCESSING
+        db.execute(update(RawLineItem).where(RawLineItem.list_run_id == run_id).values(processed_at=None))
+        error_count = 0
+        processed_count = 0
+        run.processed_rows = 0
+        run.error_rows = 0
+        run.started_at = datetime.now(UTC)
+        run.completed_at = None
+    run.last_progress_at = datetime.now(UTC)
 
-    items = db.execute(select(RawLineItem).where(RawLineItem.list_run_id == run_id)).scalars().all()
+    all_items = db.execute(
+        select(RawLineItem).where(RawLineItem.list_run_id == run_id).order_by(RawLineItem.row_number)
+    ).scalars().all()
+    items = [i for i in all_items if i.processed_at is None]
 
-    error_count = 0
-    review_count = 0
-    processed_count = 0
+    if checkpoint_every:
+        db.commit()  # persist normalization + PROCESSING status before the first slow API call
 
-    for item in items:
+    for index, item in enumerate(items, start=1):
+        # Each row's writes run inside their own SAVEPOINT (fixed
+        # 2026-11-14, Codex review on PR #14): catching a DB-level
+        # exception alone isn't isolation - Postgres marks the whole
+        # transaction aborted after any failed statement, so without a
+        # savepoint to roll back to, the *next* row's first write (or the
+        # final flush below) raised PendingRollbackError and the worker
+        # rolled back the entire run anyway. Rolling back just this
+        # row's savepoint discards its partial match/snapshot/
+        # classification writes and leaves the outer transaction usable.
+        row_failed = False
         try:
-            _process_one_item(db, run, item, sp_api_client, keepa_client)
-            processed_count += 1
+            with db.begin_nested():
+                _process_one_item(db, run, item, sp_api_client, keepa_client)
         except Exception:
             # Deliberately broad: a bad row (weird data, an unexpected API
             # shape) must never take down the whole run. Logged with full
@@ -74,23 +126,104 @@ def process_run(db: Session, run_id: uuid.UUID, sp_api_client, keepa_client) -> 
             logger.exception("Row processing failed for raw_line_item %s in run %s", item.id, run_id)
             item.parse_status = ParseStatus.ERROR
             item.parse_notes = (item.parse_notes or "") + " | Processing failed - see server logs."
+            db.flush()
+            row_failed = True
+
+        try:
+            # Its own try/except (and its own savepoint), not a `finally`
+            # on the block above (fixed 2026-10-11, found live on the real
+            # 20-row MTZ re-run): a `finally` runs outside that except's
+            # protection, so a failure in evaluate_and_route itself used
+            # to propagate past this entire loop and abort the whole run.
+            # Confirmed for real: a genuine NOT_ELIGIBLE restriction on a
+            # real ASIN hit a pre-existing enum-casing bug in review
+            # routing's DB write, which previously would have killed
+            # every row after it in the run.
+            with db.begin_nested():
+                evaluate_and_route(db, run_id, item.id)
+        except Exception:
+            logger.exception("Review routing failed for raw_line_item %s in run %s", item.id, run_id)
+            row_failed = True
+
+        # One count per row, not per failed step - a row whose processing
+        # AND routing both failed is still one bad row.
+        if row_failed:
             error_count += 1
-        finally:
-            review_entry = evaluate_and_route(db, run_id, item.id)
-            if review_entry is not None:
-                review_count += 1
+        else:
+            processed_count += 1
+        item.processed_at = datetime.now(UTC)
+
+        if checkpoint_every and index % checkpoint_every == 0:
+            run.processed_rows = processed_count
+            run.error_rows = error_count
+            run.last_progress_at = datetime.now(UTC)
+            db.commit()
+            if on_checkpoint is not None:
+                on_checkpoint(run)
+
+    review_count = db.execute(
+        select(func.count()).select_from(ManualReviewQueue).where(
+            ManualReviewQueue.list_run_id == run_id, ManualReviewQueue.status == ReviewStatus.PENDING
+        )
+    ).scalar_one()
 
     run.processed_rows = processed_count
     run.error_rows = error_count
     run.status = ListRunStatus.PARTIAL if error_count > 0 else ListRunStatus.COMPLETED
+    run.completed_at = datetime.now(UTC)
+    run.last_progress_at = run.completed_at
     db.flush()
 
+    # sp_api_client.throttle_retry_count accumulates across the whole run
+    # (same client instance for every row) - exposed so a caller can
+    # answer "how many retries did this run need" without digging through
+    # logs (added 2026-10-11, alongside the retry/backoff itself in
+    # sp_api_client.py). 0 if the client never throttled, or doesn't
+    # support the attribute at all (e.g. a stub in tests). Keepa's
+    # token-refill wait time is reported the same way (2026-11-14).
+    throttle_retries = getattr(sp_api_client, "throttle_retry_count", 0)
+    keepa_wait_seconds = getattr(keepa_client, "token_wait_seconds", 0.0)
+
     return {
-        "total_rows": len(items),
+        "total_rows": len(all_items),
         "processed_rows": processed_count,
         "error_rows": error_count,
         "review_queue_rows": review_count,
+        "resumed": resuming,
+        "sp_api_throttle_retries": throttle_retries,
+        "keepa_token_wait_seconds": round(keepa_wait_seconds, 1),
+        "keepa_lookups": getattr(keepa_client, "lookup_count", None),
     }
+
+
+def process_single_item(db: Session, run_id: uuid.UUID, raw_line_item_id: uuid.UUID, sp_api_client, keepa_client) -> dict:
+    """
+    Re-runs the match -> live data -> classify -> route pipeline for one
+    row (added 2026-11-14) - the follow-up to an owner confirming or
+    picking an ASIN (e.g. one of several UPC candidates) via
+    POST /matches/{id}/confirm, so that row gets a real classification
+    without re-spending API calls on every other row in the run. The
+    confirmed match short-circuits matching (find_or_propose_match), so
+    this only re-fetches pricing/fees/restrictions (+ Keepa if needed).
+    Same savepoint isolation as process_run; the caller commits.
+    """
+    run = db.get(ListRun, run_id)
+    item = db.get(RawLineItem, raw_line_item_id)
+    if run is None or item is None or item.list_run_id != run_id:
+        raise OrchestrationError(f"No raw_line_item {raw_line_item_id} in list_run {run_id}")
+
+    ok = True
+    try:
+        with db.begin_nested():
+            _process_one_item(db, run, item, sp_api_client, keepa_client)
+    except Exception:
+        logger.exception("Single-item reprocess failed for raw_line_item %s in run %s", item.id, run_id)
+        ok = False
+    with db.begin_nested():
+        review_entry = evaluate_and_route(db, run_id, item.id)
+    item.processed_at = datetime.now(UTC)
+    db.flush()
+    return {"raw_line_item_id": str(item.id), "ok": ok, "needs_review": review_entry is not None}
 
 
 def _process_one_item(db: Session, run: ListRun, item: RawLineItem, sp_api_client, keepa_client) -> None:
@@ -109,6 +242,7 @@ def _process_one_item(db: Session, run: ListRun, item: RawLineItem, sp_api_clien
         supplier_item_number=item.supplier_item_number,
         description=item.description or "",
         brand=item.brand,
+        upc=item.upc,
     )
     item.product_match_id = match.id
     db.flush()
@@ -116,9 +250,22 @@ def _process_one_item(db: Session, run: ListRun, item: RawLineItem, sp_api_clien
     if not match.asin:
         return  # no confident ASIN - stays unmatched, review queue picks this up on the low-confidence-match path
 
-    _fetch_and_store_snapshot(db, run, item, match.asin, sp_api_client, keepa_client)
+    snapshot = _fetch_and_store_snapshot(db, run, item, match.asin, sp_api_client)
     try:
         classification = classify_line_item(db, run.id, item.id)
+        # Keepa only when the rule engine actually got as far as the
+        # velocity check (added 2026-11-14). Velocity is the last rule
+        # engine.py evaluates - every restriction/exclusion/ROI/margin/
+        # risk outcome is decided before it - so for most rows (restricted,
+        # NO_BUY on price, HIGH_RISK...) a Keepa lookup can't change the
+        # result. The real account refills 1 Keepa token/minute; spending
+        # one on every row would make a 3,000-row list a multi-day run.
+        # The engine still makes every decision: this only supplies the
+        # one input it asked for, then asks it again.
+        if _reached_velocity_check(classification.rule_trace):
+            _attach_keepa_data(snapshot, keepa_client)
+            db.flush()
+            classification = classify_line_item(db, run.id, item.id)
     except RulesServiceError as e:
         # No active rules config, or no snapshot after all - shouldn't
         # normally happen given the guard above, but surfaces as a review
@@ -132,20 +279,13 @@ def _process_one_item(db: Session, run: ListRun, item: RawLineItem, sp_api_clien
     create_from_classification(db, classification.id)
 
 
-def _fetch_and_store_snapshot(db: Session, run: ListRun, item: RawLineItem, asin: str, sp_api_client, keepa_client) -> None:
+def _fetch_and_store_snapshot(db: Session, run: ListRun, item: RawLineItem, asin: str, sp_api_client) -> AmazonDataSnapshot:
     settings = get_settings()
 
     pricing = sp_api_client.get_pricing(asin)
     sell_price = pricing.buy_box_price or pricing.current_price or Decimal(0)
     fees = sp_api_client.get_fees_estimate(asin, sell_price)
     restrictions = sp_api_client.get_listing_restrictions(asin, seller_id=settings.sp_api_seller_id)
-
-    keepa_snapshot = None
-    try:
-        keepa_snapshot = keepa_client.get_product(asin)
-    except Exception:  # noqa: BLE001 - intentionally broad: Keepa is a secondary signal (velocity)
-        # its absence shouldn't block pricing/fees/restrictions data, which is enough to classify.
-        logger.warning("Keepa lookup failed for ASIN %s - proceeding without velocity data", asin)
 
     gated_status = GatedApprovalStatus.NOT_APPLICABLE
     if restrictions.is_gated:
@@ -167,11 +307,31 @@ def _fetch_and_store_snapshot(db: Session, run: ListRun, item: RawLineItem, asin
         ambiguous_restriction=restrictions.ambiguous_restriction,
         is_gated=restrictions.is_gated,
         gated_approval_status=gated_status,
-        sales_rank=keepa_snapshot.current_sales_rank if keepa_snapshot else None,
-        sales_rank_drops_30d=keepa_snapshot.sales_rank_drops_30d if keepa_snapshot else None,
-        sales_rank_drops_90d=keepa_snapshot.sales_rank_drops_90d if keepa_snapshot else None,
         sp_api_raw_response={"pricing": pricing.raw_response, "fees": fees.raw_response, "restrictions": restrictions.raw_response},
-        keepa_raw_response=keepa_snapshot.raw_response if keepa_snapshot else None,
     )
     db.add(snapshot)
     db.flush()
+    return snapshot
+
+
+def _reached_velocity_check(rule_trace: list[dict] | None) -> bool:
+    """True when the engine's decision hinged on velocity data it didn't have yet."""
+    return any(
+        entry.get("rule") == "sales_velocity"
+        and (entry.get("result") == "info" or (entry.get("inputs") or {}).get("sales_rank_drops_30d") is None)
+        for entry in (rule_trace or [])
+    )
+
+
+def _attach_keepa_data(snapshot: AmazonDataSnapshot, keepa_client) -> None:
+    try:
+        keepa_snapshot = keepa_client.get_product(snapshot.asin)
+    except Exception:  # noqa: BLE001 - intentionally broad: Keepa is a secondary signal (velocity)
+        # Its absence no longer means BUY-by-default: engine.py routes a
+        # missing-velocity item to REVIEW (missing_velocity_action).
+        logger.warning("Keepa lookup failed for ASIN %s - proceeding without velocity data", snapshot.asin)
+        return
+    snapshot.sales_rank = keepa_snapshot.current_sales_rank
+    snapshot.sales_rank_drops_30d = keepa_snapshot.sales_rank_drops_30d
+    snapshot.sales_rank_drops_90d = keepa_snapshot.sales_rank_drops_90d
+    snapshot.keepa_raw_response = keepa_snapshot.raw_response

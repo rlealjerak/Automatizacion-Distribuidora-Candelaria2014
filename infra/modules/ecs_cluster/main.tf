@@ -75,7 +75,7 @@ data "aws_iam_policy_document" "ecs_task_app_permissions" {
 
   statement {
     sid       = "ListProcessingQueue"
-    actions   = ["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
+    actions   = ["sqs:SendMessage", "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes", "sqs:ChangeMessageVisibility"]
     resources = [var.sqs_queue_arn]
   }
 

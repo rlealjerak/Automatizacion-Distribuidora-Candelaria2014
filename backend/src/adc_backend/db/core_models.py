@@ -12,7 +12,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Enum, ForeignKey, Text, func
+from sqlalchemy import DateTime, Enum, ForeignKey, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -46,6 +46,10 @@ class Supplier(Base):
     contact_phone: Mapped[str | None]
     notes: Mapped[str | None] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(default=True, server_default="true")
+    # Synthetic suppliers created for testing in prod (the PRUEBA/Goal1
+    # ones) - added 2026-11-14 so they can be cleaned up through the app's
+    # own write path instead of raw DELETEs (see CLAUDE.md).
+    is_test: Mapped[bool] = mapped_column(default=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now())
 
@@ -84,6 +88,9 @@ class ListRun(Base):
 
     started_at: Mapped[datetime | None]
     completed_at: Mapped[datetime | None]
+    # Updated at every processing checkpoint - "is a worker still actively
+    # on this run" for POST /process's duplicate-enqueue guard (2026-11-14).
+    last_progress_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     error_summary: Mapped[str | None] = mapped_column(Text)  # run-level failure reason, if status=failed
 
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())

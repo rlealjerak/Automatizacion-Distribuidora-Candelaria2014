@@ -334,3 +334,91 @@ def test_revoke_approval_endpoint_end_to_end(client, db_session):
         db_session.query(ListRun).filter_by(id=run.id).delete()
         db_session.query(Supplier).filter_by(id=supplier.id).delete()
         db_session.commit()
+
+
+def test_multi_upc_review_entry_is_actionable_end_to_end(client, db_session):
+    # Codex review on PR #14: the review queue showed the candidate ASINs
+    # only as prose, and nothing exposed the product_match_id that
+    # POST /matches/{id}/confirm needs - the owner couldn't act on it.
+    from datetime import UTC, datetime
+
+    from adc_backend.db.core_models import ListRun, ListRunStatus, SourceFileType, Supplier
+    from adc_backend.modules.ingestion.models import RawLineItem
+    from adc_backend.modules.matching.models import MatchSource, MatchStatus, ProductMatch
+    from adc_backend.modules.review.models import ManualReviewQueue, ReviewReason
+
+    supplier = Supplier(name=f"Seed Supplier {uuid.uuid4()}", code=f"seed-{uuid.uuid4().hex[:8]}")
+    db_session.add(supplier)
+    db_session.flush()
+    run = ListRun(
+        supplier_id=supplier.id, source_file_s3_key="s3://x/y.csv", source_file_original_filename="y.csv",
+        source_file_type=SourceFileType.CSV, confirmed_column_mapping={"supplier_item_number": "ITEM"},
+        status=ListRunStatus.PROCESSING, last_progress_at=datetime.now(UTC),
+    )
+    db_session.add(run)
+    db_session.flush()
+    match = ProductMatch(
+        supplier_id=supplier.id, supplier_item_number="MTZ-1", asin=None, match_status=MatchStatus.PROPOSED,
+        match_source=MatchSource.UPC, candidate_asins=["B0FIRST", "B0SECOND"],
+    )
+    db_session.add(match)
+    db_session.flush()
+    item = RawLineItem(list_run_id=run.id, row_number=1, raw_data={}, supplier_item_number="MTZ-1", product_match_id=match.id)
+    db_session.add(item)
+    db_session.flush()
+    db_session.add(ManualReviewQueue(list_run_id=run.id, raw_line_item_id=item.id, reason=ReviewReason.MULTIPLE_UPC_MATCHES, reason_notes="x"))
+    db_session.commit()
+
+    try:
+        entry = client.get(f"/runs/{run.id}/review-queue").json()[0]
+        assert entry["product_match_id"] == str(match.id)
+        assert entry["candidate_asins"] == ["B0FIRST", "B0SECOND"]
+        assert entry["proposed_asin"] is None
+
+        result_item = client.get(f"/runs/{run.id}/results").json()["items"][0]
+        assert result_item["product_match_id"] == str(match.id)
+        assert result_item["candidate_asins"] == ["B0FIRST", "B0SECOND"]
+
+        no_asin = client.post(f"/matches/{match.id}/confirm", json={"confirmed_by": "owner"})
+        assert no_asin.status_code == 400  # nothing proposed to confirm - must pick one
+
+        picked = client.post(f"/matches/{match.id}/confirm", json={"confirmed_by": "owner", "asin": "B0SECOND"})
+        assert picked.status_code == 200
+        assert picked.json()["asin"] == "B0SECOND"
+        assert picked.json()["match_source"] == "upc"
+
+        # A run with a recent checkpoint is already being worked on - a
+        # second enqueue would cause a from-scratch re-run later.
+        dup = client.post(f"/runs/{run.id}/process")
+        assert dup.status_code == 409
+
+        run_resp = client.get(f"/runs/{run.id}").json()
+        assert run_resp["last_progress_at"] is not None
+    finally:
+        db_session.query(ManualReviewQueue).filter_by(list_run_id=run.id).delete()
+        db_session.query(RawLineItem).filter_by(list_run_id=run.id).delete()
+        db_session.query(ProductMatch).filter_by(supplier_id=supplier.id).delete()
+        db_session.query(ListRun).filter_by(id=run.id).delete()
+        db_session.query(Supplier).filter_by(id=supplier.id).delete()
+        db_session.commit()
+
+
+def test_retire_test_supplier_requires_matching_code(client, db_session):
+    from adc_backend.db.core_models import Supplier
+
+    supplier = Supplier(name=f"PRUEBA {uuid.uuid4()}", code=f"prueba-{uuid.uuid4().hex[:8]}")
+    db_session.add(supplier)
+    db_session.commit()
+    try:
+        wrong = client.post(f"/suppliers/{supplier.id}/retire-test", json={"confirm_code": "nope", "retired_by": "admin"})
+        assert wrong.status_code == 400
+        ok = client.post(f"/suppliers/{supplier.id}/retire-test", json={"confirm_code": supplier.code, "retired_by": "admin"})
+        assert ok.status_code == 200
+        assert ok.json()["is_test"] is True
+        assert ok.json()["withdrawn_approvals"] == []
+        db_session.expire_all()
+        refreshed = db_session.get(Supplier, supplier.id)
+        assert refreshed.is_test is True and refreshed.is_active is False
+    finally:
+        db_session.query(Supplier).filter_by(id=supplier.id).delete()
+        db_session.commit()

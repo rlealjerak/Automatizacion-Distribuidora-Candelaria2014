@@ -32,8 +32,20 @@ class SupplierOut(BaseModel):
     name: str
     code: str
     is_active: bool
+    is_test: bool = False
 
     model_config = {"from_attributes": True}
+
+
+class RetireTestSupplierRequest(BaseModel):
+    confirm_code: str  # must equal the supplier's own code
+    retired_by: str
+
+
+class ReprocessItemQueuedResponse(BaseModel):
+    run_id: uuid.UUID
+    raw_line_item_id: uuid.UUID
+    status: str = "queued"
 
 
 class ListRunOut(BaseModel):
@@ -45,6 +57,11 @@ class ListRunOut(BaseModel):
     processed_rows: int
     error_rows: int
     created_at: datetime
+    # Live progress fields (2026-11-14) - updated at every processing
+    # checkpoint, so polling GET /runs/{id} shows a run moving.
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    last_progress_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 
@@ -59,6 +76,9 @@ class ListRunOut(BaseModel):
             processed_rows=run.processed_rows,
             error_rows=run.error_rows,
             created_at=run.created_at,
+            started_at=run.started_at,
+            completed_at=run.completed_at,
+            last_progress_at=run.last_progress_at,
         )
 
 
@@ -75,6 +95,12 @@ class ProposedFieldMapping(BaseModel):
 class ProposedMappingOut(BaseModel):
     run_id: uuid.UUID
     mapping: dict[str, ProposedFieldMapping]
+    # Every raw header this run actually has, including blank-header
+    # columns auto-named by position (e.g. "column_1") - added 2026-10-11
+    # so a caller can map by position without already knowing that
+    # naming convention. `mapping` above only ever shows best-guess
+    # proposals, never the full available set.
+    available_headers: list[str]
 
 
 class ConfirmMappingRequest(BaseModel):
@@ -84,6 +110,9 @@ class ConfirmMappingRequest(BaseModel):
     unit_price: str | None = None
     case_quantity: str | None = None
     case_unit: str | None = None
+    # Its own field, deliberately independent of supplier_item_number -
+    # added 2026-10-11 for UPC-first matching (modules/matching/engine.py).
+    upc: str | None = None
     confirmed_by: str
 
 
@@ -108,7 +137,9 @@ class LineItemResultOut(BaseModel):
     unit_price: Decimal | None
     item_type: str
     parse_status: str
+    product_match_id: uuid.UUID | None = None
     asin: str | None
+    candidate_asins: list[str] | None = None
     match_confidence: float | None
     match_status: str | None
     classification: str | None

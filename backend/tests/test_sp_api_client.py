@@ -223,12 +223,108 @@ def test_get_listing_restrictions_no_restrictions_means_approved():
     assert result.approved_for_seller is True
 
 
-def test_rate_limit_raises_sp_api_error():
+def test_search_catalog_items_by_identifier_parses_summaries():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "amazon.com/auth" in str(request.url):
+            return _lwa_response(request)
+        assert request.url.path == "/catalog/2022-04-01/items"
+        assert request.url.params["identifiers"] == "8411061088180"
+        assert request.url.params["identifiersType"] == "EAN"
+        return httpx.Response(
+            200,
+            json={"items": [{"asin": "B0UPCMATCH", "summaries": [{"itemName": "212 EDT", "brand": "Carolina Herrera"}]}]},
+        )
+
+    client = _client_with_transport(handler)
+    matches = client.search_catalog_items_by_identifier("8411061088180", "EAN")
+    assert len(matches) == 1
+    assert matches[0].asin == "B0UPCMATCH"
+
+
+def test_search_catalog_items_by_identifier_multiple_hits():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "amazon.com/auth" in str(request.url):
+            return _lwa_response(request)
+        return httpx.Response(
+            200,
+            json={
+                "items": [
+                    {"asin": "B0FIRST", "summaries": [{"itemName": "x", "brand": None}]},
+                    {"asin": "B0SECOND", "summaries": [{"itemName": "y", "brand": None}]},
+                ]
+            },
+        )
+
+    client = _client_with_transport(handler)
+    matches = client.search_catalog_items_by_identifier("737052189765", "UPC")
+    assert [m.asin for m in matches] == ["B0FIRST", "B0SECOND"]
+
+
+# --- throttling retry (exponential backoff + jitter, added 2026-10-11) ---
+
+
+def test_rate_limit_raises_sp_api_error_after_exhausting_retries():
+    call_count = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "amazon.com/auth" in str(request.url):
+            return _lwa_response(request)
+        call_count["n"] += 1
+        return httpx.Response(429, text="Too Many Requests")
+
+    client = _client_with_transport(handler)
+    client._sleep = lambda seconds: None  # no real delay in tests
+    with pytest.raises(SPAPIError):
+        client.get_pricing("B000000001")
+    # 1 initial attempt + MAX_THROTTLE_RETRIES retries, all 429.
+    from adc_backend.modules.amazon.sp_api_client import MAX_THROTTLE_RETRIES
+
+    assert call_count["n"] == MAX_THROTTLE_RETRIES + 1
+    assert client.throttle_retry_count == MAX_THROTTLE_RETRIES
+
+
+def test_rate_limit_retries_then_succeeds_and_counts_retries():
+    call_count = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "amazon.com/auth" in str(request.url):
+            return _lwa_response(request)
+        call_count["n"] += 1
+        if call_count["n"] < 3:  # throttled twice, then succeeds
+            return httpx.Response(429, text="Too Many Requests")
+        return httpx.Response(200, json={"payload": {"Summary": {"TotalOfferCount": 1}, "Offers": []}})
+
+    client = _client_with_transport(handler)
+    recorded_delays = []
+    client._sleep = recorded_delays.append
+
+    pricing = client.get_pricing("B000000001")
+    assert pricing.seller_count == 1
+    assert call_count["n"] == 3
+    assert client.throttle_retry_count == 2
+    # Exponential: second delay strictly larger than the first (jitter
+    # aside, the base 2^attempt term dominates).
+    assert len(recorded_delays) == 2
+    assert recorded_delays[1] > recorded_delays[0] - 1.0  # loose bound, jitter-tolerant
+
+
+def test_rate_limit_backoff_is_exponential_with_jitter():
+    delays = []
+
     def handler(request: httpx.Request) -> httpx.Response:
         if "amazon.com/auth" in str(request.url):
             return _lwa_response(request)
         return httpx.Response(429, text="Too Many Requests")
 
     client = _client_with_transport(handler)
+    client._sleep = delays.append
     with pytest.raises(SPAPIError):
         client.get_pricing("B000000001")
+
+    # Each successive base delay (2^attempt * BASE_BACKOFF_SECONDS) is
+    # strictly larger than the last, even accounting for up to one full
+    # base-second of jitter on either side.
+    from adc_backend.modules.amazon.sp_api_client import BASE_BACKOFF_SECONDS
+
+    for i in range(len(delays) - 1):
+        assert delays[i + 1] + BASE_BACKOFF_SECONDS > delays[i]

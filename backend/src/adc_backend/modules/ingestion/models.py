@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Enum, ForeignKey, Numeric, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, Enum, ForeignKey, Numeric, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -52,6 +52,11 @@ class RawLineItem(Base):
 
     # Normalized fields - best-effort, per confirmed column mapping.
     supplier_item_number: Mapped[str | None]  # join key for the persistent ASIN mapping
+    # Its own field, deliberately never mapped as supplier_item_number
+    # (added 2026-10-11 - see modules/matching/upc.py/engine.py). Stored
+    # as given; check-digit validation happens at match time, not here,
+    # so an invalid value is still visible/debuggable rather than silently dropped.
+    upc: Mapped[str | None]
     description: Mapped[str | None] = mapped_column(Text)
     brand: Mapped[str | None]
     unit_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
@@ -70,6 +75,10 @@ class RawLineItem(Base):
     # Set once the matching engine (or a persisted prior mapping) resolves
     # this item to an ASIN. Nullable - many items sit unmatched/in-review.
     product_match_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("product_matches.id"))
+    # Stamped when process_run finishes this row (success or isolated
+    # failure) - lets an interrupted run resume where it left off instead
+    # of re-spending rate-limited SP-API/Keepa calls (added 2026-11-14).
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 

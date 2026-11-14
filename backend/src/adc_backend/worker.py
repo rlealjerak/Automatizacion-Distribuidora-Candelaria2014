@@ -29,7 +29,7 @@ from adc_backend.config import get_settings, get_sqs_client
 from adc_backend.db.base import get_sessionmaker
 from adc_backend.modules.amazon.keepa_client import KeepaClient
 from adc_backend.modules.amazon.sp_api_client import SPAPIClient
-from adc_backend.modules.tools.orchestration import OrchestrationError, process_run
+from adc_backend.modules.tools.orchestration import OrchestrationError, process_run, process_single_item
 
 logging.basicConfig(level=logging.INFO)
 # See main.py's identical line for why: httpx logs the full request URL at
@@ -38,6 +38,16 @@ logging.basicConfig(level=logging.INFO)
 # is the process that actually caught it live (2026-08-20).
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+
+# Rows between commits/heartbeats (2026-11-14). Small on purpose: at real
+# rate limits (SP-API pricing ~0.5 req/s, Keepa 1 token/min on this
+# account) 10 rows can still take several minutes, and every checkpoint
+# also re-arms the SQS visibility timeout below.
+CHECKPOINT_EVERY_ROWS = 10
+# Matches the queue's own visibility_timeout_seconds (infra/modules/sqs) -
+# each checkpoint pushes redelivery this far out again, so a multi-hour
+# run is never handed to a second receive while it's still progressing.
+VISIBILITY_EXTENSION_SECONDS = 1800
 
 
 def main() -> None:
@@ -68,9 +78,37 @@ def _handle_message(sqs, queue_url: str, message: dict) -> None:
         logger.error("Malformed message, leaving on queue for SQS's redrive policy to handle: %s", e)
         return  # deliberately not deleted
 
+    raw_line_item_id = None
+    if body.get("raw_line_item_id"):
+        try:
+            raw_line_item_id = uuid.UUID(body["raw_line_item_id"])
+        except (ValueError, TypeError) as e:
+            logger.error("Malformed raw_line_item_id, leaving on queue for SQS's redrive policy to handle: %s", e)
+            return
+
+    def _heartbeat(_run) -> None:
+        # Best-effort: a failed extension only risks a redelivery, which
+        # the run's own checkpoint/resume logic already handles safely.
+        try:
+            sqs.change_message_visibility(
+                QueueUrl=queue_url, ReceiptHandle=receipt_handle, VisibilityTimeout=VISIBILITY_EXTENSION_SECONDS
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("Couldn't extend SQS visibility for run %s", run_id, exc_info=True)
+
     session = get_sessionmaker()()
     try:
-        summary = process_run(session, run_id, SPAPIClient(), KeepaClient())
+        if raw_line_item_id is not None:
+            summary = process_single_item(session, run_id, raw_line_item_id, SPAPIClient(), KeepaClient())
+        else:
+            summary = process_run(
+                session,
+                run_id,
+                SPAPIClient(),
+                KeepaClient(),
+                checkpoint_every=CHECKPOINT_EVERY_ROWS,
+                on_checkpoint=_heartbeat,
+            )
         session.commit()
         logger.info("Processed run %s: %s", run_id, summary)
         sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)

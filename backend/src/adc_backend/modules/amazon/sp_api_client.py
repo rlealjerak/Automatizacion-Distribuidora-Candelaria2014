@@ -32,10 +32,21 @@ Scope: catalog search (for text/brand matching, step 7), pricing/buy box,
 fees estimate, and restrictions/gated status - the four SP-API capabilities
 build-order step 5 calls for. Does not implement order/inventory/reports
 APIs - out of scope for this system.
+
+search_catalog_items_by_identifier (added 2026-10-11, for UPC-first
+matching - see modules/matching/upc.py and engine.py) is NOT yet
+live-verified against the real API - same documented-contract-only
+status the other four started from before 2026-08-15. Verify against a
+real UPC before relying on it in a live run.
+
+_request's throttling retry (exponential backoff + jitter, added
+2026-10-11) is new and untested against real SP-API 429 behavior -
+mocked-429 tests only so far.
 """
 
 from __future__ import annotations
 
+import random
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -51,6 +62,15 @@ LWA_TOKEN_URL = "https://api.amazon.com/auth/o2/token"
 # yet since nothing in CLAUDE.md's brief mentions multi-marketplace.
 NA_BASE_URL = "https://sellingpartnerapi-na.amazon.com"
 US_MARKETPLACE_ID = "ATVPDKIKX0DER"
+
+# Throttling retry policy (2026-10-11): a real MTZ test run hit real
+# SP-API 429s on pricing/fees calls (confirmed via CloudWatch logs), and
+# _request used to raise immediately on the first one - failing the row
+# instead of just slowing down for it. Exponential backoff with jitter,
+# bounded by MAX_THROTTLE_RETRIES, retries the same request in place;
+# only once retries are exhausted does _request still raise SPAPIError.
+MAX_THROTTLE_RETRIES = 5
+BASE_BACKOFF_SECONDS = 1.0
 
 
 class SPAPIError(Exception):
@@ -104,10 +124,16 @@ class RestrictionsResult:
 
 
 class SPAPIClient:
-    def __init__(self, http_client: httpx.Client | None = None):
+    def __init__(self, http_client: httpx.Client | None = None, sleep_fn=time.sleep):
         self._http = http_client or httpx.Client(timeout=30.0)
         self._access_token: str | None = None
         self._token_expires_at: float = 0.0
+        # Injectable so tests exercise real retry control flow without
+        # real delays (see test_sp_api_client.py). Also doubles as the
+        # per-run throttle counter orchestration.py reports to the caller
+        # ("Report how many retries a run needed").
+        self._sleep = sleep_fn
+        self.throttle_retry_count = 0
 
     # --- auth ---
 
@@ -140,12 +166,26 @@ class SPAPIClient:
     def _request(self, method: str, path: str, **kwargs) -> dict:
         token = self._get_access_token()
         headers = {"x-amz-access-token": token, **kwargs.pop("headers", {})}
-        response = self._http.request(method, f"{NA_BASE_URL}{path}", headers=headers, **kwargs)
-        if response.status_code == 429:
-            raise SPAPIError(f"SP-API rate limited on {path} - caller should back off and retry")
-        if response.status_code >= 400:
-            raise SPAPIError(f"SP-API {method} {path} failed: {response.status_code} {response.text}")
-        return response.json()
+
+        attempt = 0
+        while True:
+            response = self._http.request(method, f"{NA_BASE_URL}{path}", headers=headers, **kwargs)
+            if response.status_code == 429:
+                if attempt >= MAX_THROTTLE_RETRIES:
+                    raise SPAPIError(
+                        f"SP-API rate limited on {path} - exhausted {MAX_THROTTLE_RETRIES} retries, giving up"
+                    )
+                # Exponential backoff with jitter: 2^attempt * base, plus a
+                # random 0-base-second jitter so many rows throttled at
+                # once don't all retry in lockstep and re-trigger the limit.
+                delay = (2**attempt) * BASE_BACKOFF_SECONDS + random.uniform(0, BASE_BACKOFF_SECONDS)
+                self._sleep(delay)
+                self.throttle_retry_count += 1
+                attempt += 1
+                continue
+            if response.status_code >= 400:
+                raise SPAPIError(f"SP-API {method} {path} failed: {response.status_code} {response.text}")
+            return response.json()
 
     # --- catalog search (build-order step 5 / feeds step 7's matching engine) ---
 
@@ -155,6 +195,39 @@ class SPAPIClient:
         params = {"keywords": keywords, "marketplaceIds": marketplace_id, "includedData": "summaries"}
         if brand:
             params["brandNames"] = brand
+        body = self._request("GET", "/catalog/2022-04-01/items", params=params)
+
+        matches: list[CatalogMatch] = []
+        for item in body.get("items", []):
+            summaries = item.get("summaries", [])
+            summary = summaries[0] if summaries else {}
+            matches.append(
+                CatalogMatch(
+                    asin=item["asin"],
+                    title=summary.get("itemName", ""),
+                    brand=summary.get("brand"),
+                )
+            )
+        return matches
+
+    def search_catalog_items_by_identifier(
+        self, identifier: str, identifier_type: str, marketplace_id: str = US_MARKETPLACE_ID
+    ) -> list[CatalogMatch]:
+        """
+        UPC/EAN-first lookup (2026-10-11): same endpoint as
+        search_catalog_items, but SP-API's documented `identifiers` +
+        `identifiersType` params instead of `keywords` - an exact
+        barcode lookup, not a fuzzy text search. identifier_type is
+        "UPC" (12-digit) or "EAN" (13-digit), chosen by the caller based
+        on the barcode's length (see modules/matching/upc.py) - never
+        guessed here.
+        """
+        params = {
+            "identifiers": identifier,
+            "identifiersType": identifier_type,
+            "marketplaceIds": marketplace_id,
+            "includedData": "summaries",
+        }
         body = self._request("GET", "/catalog/2022-04-01/items", params=params)
 
         matches: list[CatalogMatch] = []
