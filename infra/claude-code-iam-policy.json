@@ -43,7 +43,9 @@
       ],
       "Resource": "*",
       "Condition": {
-        "StringEquals": { "aws:RequestedRegion": "us-east-1" }
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-1"
+        }
       }
     },
     {
@@ -63,7 +65,9 @@
       ],
       "Resource": "*",
       "Condition": {
-        "StringEquals": { "aws:RequestedRegion": "us-east-1" }
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-1"
+        }
       }
     },
     {
@@ -110,11 +114,15 @@
         "ecs:ListTasks",
         "ecs:DescribeTasks",
         "ecs:RunTask",
-        "ecs:StopTask"
+        "ecs:StopTask",
+        "ecs:ListServices",
+        "ecs:ExecuteCommand"
       ],
       "Resource": "*",
       "Condition": {
-        "StringEquals": { "aws:RequestedRegion": "us-east-1" }
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-1"
+        }
       }
     },
     {
@@ -146,7 +154,9 @@
       ],
       "Resource": "*",
       "Condition": {
-        "StringEquals": { "aws:RequestedRegion": "us-east-1" }
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-1"
+        }
       }
     },
     {
@@ -179,7 +189,9 @@
       ],
       "Resource": "*",
       "Condition": {
-        "StringEquals": { "aws:RequestedRegion": "us-east-1" }
+        "StringEquals": {
+          "aws:RequestedRegion": "us-east-1"
+        }
       }
     },
     {
@@ -190,7 +202,8 @@
         "logs:DeleteLogGroup",
         "logs:PutRetentionPolicy",
         "logs:TagResource",
-        "logs:ListTagsForResource"
+        "logs:ListTagsForResource",
+        "logs:FilterLogEvents"
       ],
       "Resource": "arn:aws:logs:us-east-1:617464676572:log-group:/ecs/adc-*"
     },
@@ -224,7 +237,9 @@
       "Action": "iam:PassRole",
       "Resource": "arn:aws:iam::617464676572:role/adc-*",
       "Condition": {
-        "StringEquals": { "iam:PassedToService": "ecs-tasks.amazonaws.com" }
+        "StringEquals": {
+          "iam:PassedToService": "ecs-tasks.amazonaws.com"
+        }
       }
     },
     {
@@ -247,7 +262,9 @@
       "Action": "iam:PassRole",
       "Resource": "arn:aws:iam::617464676572:role/adc-*",
       "Condition": {
-        "StringEquals": { "iam:PassedToService": "scheduler.amazonaws.com" }
+        "StringEquals": {
+          "iam:PassedToService": "scheduler.amazonaws.com"
+        }
       }
     },
     {
@@ -266,6 +283,33 @@
           ]
         }
       }
+    },
+    {
+      "Sid": "EfsReadWrite",
+      "Effect": "Allow",
+      "Action": [
+        "elasticfilesystem:CreateFileSystem",
+        "elasticfilesystem:DeleteFileSystem",
+        "elasticfilesystem:DescribeFileSystems",
+        "elasticfilesystem:UpdateFileSystem",
+        "elasticfilesystem:CreateMountTarget",
+        "elasticfilesystem:DeleteMountTarget",
+        "elasticfilesystem:DescribeMountTargets",
+        "elasticfilesystem:DescribeMountTargetSecurityGroups",
+        "elasticfilesystem:ModifyMountTargetSecurityGroups",
+        "elasticfilesystem:CreateAccessPoint",
+        "elasticfilesystem:DeleteAccessPoint",
+        "elasticfilesystem:DescribeAccessPoints",
+        "elasticfilesystem:DescribeLifecycleConfiguration",
+        "elasticfilesystem:PutLifecycleConfiguration",
+        "elasticfilesystem:DescribeBackupPolicy",
+        "elasticfilesystem:PutBackupPolicy",
+        "elasticfilesystem:DescribeFileSystemPolicy",
+        "elasticfilesystem:TagResource",
+        "elasticfilesystem:UntagResource",
+        "elasticfilesystem:ListTagsForResource"
+      ],
+      "Resource": "*"
     }
   ]
 }

@@ -1,0 +1,68 @@
+# Runs on every PR and every push to main (added 2026-11-14). Catches the
+# kind of thing this repo has historically found only at deploy time -
+# a lockfile that can't install, a migration that doesn't round-trip, a
+# broken test - before anything is built into an image.
+#
+# Deliberately no AWS credentials here: tests needing real S3
+# (S3_BUCKET_NAME) skip themselves cleanly, everything else runs against
+# a throwaway Postgres service container. Deploys stay a manual,
+# checklist-driven step (scripts/deploy_backend.sh) - CI never deploys.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: adc
+          POSTGRES_USER: adc_admin
+          POSTGRES_PASSWORD: ci_only_not_a_secret
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U adc_admin -d adc"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg2://adc_admin:ci_only_not_a_secret@localhost:5432/adc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies (same lockfile the Docker image uses)
+        run: |
+          pip install poetry==1.8.3
+          poetry config virtualenvs.create false
+          poetry install --no-root --no-interaction
+      - name: Lint
+        run: ruff check .
+      - name: Migrations round-trip (upgrade -> downgrade base -> upgrade)
+        run: |
+          alembic upgrade head
+          alembic downgrade base
+          alembic upgrade head
+      - name: Tests
+        run: pytest -q
+
+  infra:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.8"
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false -input=false
+      - run: terraform validate

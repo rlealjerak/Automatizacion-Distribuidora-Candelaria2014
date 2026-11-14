@@ -47,3 +47,7 @@ output "alb_dns_name" {
 output "api_key_secret_name" {
   value = module.secrets.api_key_secret_name
 }
+
+output "openclaw_ecr_repository_url" {
+  value = module.openclaw.ecr_repository_url
+}

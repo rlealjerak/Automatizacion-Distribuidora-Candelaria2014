@@ -118,3 +118,14 @@ resource "aws_secretsmanager_secret_version" "openclaw_anthropic_key" {
     ignore_changes = [secret_string]
   }
 }
+
+# OpenClaw Gateway's own auth token (protects its loopback API / Control
+# UI access via ECS Exec tunneling - see OPENCLAW_DEPLOYMENT_PLAN.md
+# Section 6). Created by hand on 2026-10-10 outside Terraform; imported
+# 2026-11-14 (see the import block in ../../main.tf) so it's managed like
+# every other secret. No secret_version resource on purpose: the real
+# value already exists and must never round-trip through Terraform state.
+resource "aws_secretsmanager_secret" "openclaw_gateway_token" {
+  name        = "${var.project_name}/${var.environment}/openclaw-gateway-token"
+  description = "OpenClaw gateway auth token"
+}
