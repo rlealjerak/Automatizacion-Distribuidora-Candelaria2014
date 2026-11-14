@@ -28,7 +28,7 @@ CONFIG = DEFAULT_RULES_CONFIG
 
 
 def _inputs(**overrides) -> ClassificationInputs:
-    """A solid BUY-shaped baseline: cost 10, sell 20, fees 5 -> profit 5 -> ROI 50%, margin 25%."""
+    """A solid BUY-shaped baseline: cost 10, sell 20, fees 5 -> profit 5 -> ROI 50%, margin 25%, healthy velocity."""
     defaults = dict(
         unit_cost=Decimal(10),
         sell_price=Decimal(20),
@@ -42,7 +42,9 @@ def _inputs(**overrides) -> ClassificationInputs:
         manufacturer_sells_directly=False,
         amazon_has_buy_box=False,
         seller_count=2,
-        sales_rank_drops_30d=None,
+        # Real velocity by default (2026-11-14): missing velocity now
+        # routes to REVIEW, so a "BUY-shaped" baseline needs real data.
+        sales_rank_drops_30d=100,
     )
     defaults.update(overrides)
     return ClassificationInputs(**defaults)
@@ -203,8 +205,24 @@ class TestRiskFactors:
         assert decision.classification == ClassificationLabel.BUY
         assert _trace_rules(decision)["sales_velocity"] == "pass"
 
-    def test_missing_velocity_data_does_not_block_buy(self):
+    def test_missing_velocity_data_routes_to_review_by_default(self):
+        # Owner decision 2026-11-14: no sales data is ambiguous, not a pass.
         decision = classify(_inputs(sales_rank_drops_30d=None), CONFIG)
+        assert decision.classification == ClassificationLabel.REVIEW
+        velocity = next(e for e in decision.rule_trace if e["rule"] == "sales_velocity")
+        assert velocity["result"] == "fail"
+        assert velocity["inputs"]["sales_rank_drops_30d"] is None
+        assert "manual review" in velocity["reasoning"]
+
+    def test_config_without_missing_velocity_key_still_routes_to_review(self):
+        # Every config stored before 2026-11-14 lacks the key - the safe
+        # behavior must apply to them too, without a config migration.
+        legacy = {k: v for k, v in CONFIG.items() if k != "missing_velocity_action"}
+        decision = classify(_inputs(sales_rank_drops_30d=None), legacy)
+        assert decision.classification == ClassificationLabel.REVIEW
+
+    def test_missing_velocity_proceed_option_keeps_old_behavior(self):
+        decision = classify(_inputs(sales_rank_drops_30d=None), {**CONFIG, "missing_velocity_action": "proceed"})
         assert decision.classification == ClassificationLabel.BUY
         assert _trace_rules(decision)["sales_velocity"] == "info"
 

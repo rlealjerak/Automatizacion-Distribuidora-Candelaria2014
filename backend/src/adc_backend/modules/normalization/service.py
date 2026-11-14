@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from adc_backend.db.core_models import ListRun, ListRunStatus
 from adc_backend.modules.ingestion.models import RawLineItem
+from adc_backend.modules.matching.upc import normalize_upc
 from adc_backend.modules.normalization.classify_line_item import classify_line_item
 from adc_backend.modules.normalization.column_mapping import mapping_to_json, propose_column_mapping
 from adc_backend.modules.normalization.unit_lookup import resolve_unit
@@ -143,7 +144,7 @@ def apply_normalization(db: Session, run_id: uuid.UUID) -> dict[str, int]:
         )
 
         item.supplier_item_number = supplier_item_number
-        item.upc = upc
+        item.upc = normalize_upc(upc)
         item.description = description
         item.brand = brand
         item.unit_price = outcome.unit_price

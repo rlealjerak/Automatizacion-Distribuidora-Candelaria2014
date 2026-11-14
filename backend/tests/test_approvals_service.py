@@ -552,3 +552,51 @@ def test_por_que_riesgo_case_pack_capital_and_fetched_at_in_summary_payload(db_s
     assert approved.summary_payload["case_quantity"] == "12"
     assert approved.summary_payload["case_unit"] == "DP"
     assert approved.summary_payload["capital_required"] == "120.00"
+
+
+# --- added 2026-11-14: re-run dedupe, test-supplier withdrawal ---
+
+
+def test_reprocessed_classification_does_not_queue_a_second_approval(db_session, supplier):
+    from adc_backend.modules.approvals.models import ApprovalQueue
+    from adc_backend.modules.approvals.service import create_from_classification
+    from adc_backend.modules.rules.models import ClassificationLabel
+
+    result = _make_result(db_session, supplier.id, ClassificationLabel.BUY, roi=Decimal("34.0"), margin=Decimal("18.0"))
+    first = create_from_classification(db_session, result.id)
+    second = create_from_classification(db_session, result.id)  # what a re-run of the same list does
+
+    assert second.id == first.id
+    assert db_session.query(ApprovalQueue).filter_by(analysis_result_ref=result.id).count() == 1
+
+
+def test_withdraw_test_supplier_items_denies_audits_and_advances_queue(db_session, supplier):
+    from adc_backend.db.core_models import Supplier
+    from adc_backend.modules.approvals.models import ApprovalAuditLog, ApprovalQueue, ApprovalStatus
+    from adc_backend.modules.approvals.service import create_from_classification, list_queue, withdraw_test_supplier_items
+    from adc_backend.modules.rules.models import ClassificationLabel
+
+    test_supplier = supplier
+    real_supplier = Supplier(name=f"Real Supplier {uuid.uuid4()}", code=f"real-{uuid.uuid4().hex[:8]}")
+    db_session.add(real_supplier)
+    db_session.flush()
+
+    test_active = create_from_classification(db_session, _make_result(db_session, test_supplier.id, ClassificationLabel.BUY).id)
+    test_queued = create_from_classification(db_session, _make_result(db_session, test_supplier.id, ClassificationLabel.HIGH_RISK).id)
+    real_queued = create_from_classification(db_session, _make_result(db_session, real_supplier.id, ClassificationLabel.HIGH_RISK).id)
+    assert test_active.is_active_item and real_queued.queue_position == 2
+
+    withdrawn = withdraw_test_supplier_items(db_session, test_supplier.id, actor="admin-cleanup")
+
+    assert {i.id for i in withdrawn} == {test_active.id, test_queued.id}
+    for item in (test_active, test_queued):
+        assert item.status == ApprovalStatus.DENIED
+        assert item.is_active_item is False
+        assert "synthetic test item" in item.resolution_note
+    active, queued = list_queue(db_session)
+    assert active.id == real_queued.id  # the real item is what the client sees next
+    assert queued == []
+    audit = db_session.query(ApprovalAuditLog).filter(ApprovalAuditLog.approval_id.in_([test_active.id, test_queued.id])).all()
+    assert len(audit) == 2 and all(a.action == "withdraw_test" and a.ok for a in audit)
+    # Not deleted - still in the table as history.
+    assert db_session.query(ApprovalQueue).filter(ApprovalQueue.id.in_([test_active.id, test_queued.id])).count() == 2

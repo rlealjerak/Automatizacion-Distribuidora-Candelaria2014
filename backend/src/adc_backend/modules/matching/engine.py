@@ -64,6 +64,10 @@ MIN_PROPOSAL_CONFIDENCE = 0.40
 LOW_CONFIDENCE_REVIEW_THRESHOLD = 0.75
 
 
+class MatchConfirmationError(ValueError):
+    """The match exists, but the confirm request itself can't be applied (400, not 404)."""
+
+
 @dataclass
 class ScoredCandidate:
     candidate: CatalogMatch
@@ -219,9 +223,20 @@ def confirm_match(db: Session, match_id: uuid.UUID, confirmed_by: str, asin: str
     if match is None:
         raise ValueError(f"No product_match with id {match_id}")
     if asin is not None and asin != match.asin:
-        match.asin = asin
-        match.match_source = MatchSource.MANUAL
-        match.match_confidence = None  # a manual override has no fuzzy-match confidence score to report
+        if match.match_source == MatchSource.UPC and asin in (match.candidate_asins or []):
+            # Owner picked one of the ASINs the barcode lookup itself
+            # returned (multi-UPC review case, 2026-11-14) - still a
+            # barcode-backed match, not a free-typed override, so it keeps
+            # its UPC source and exact-match confidence. candidate_asins
+            # stays as the record of what the owner chose between.
+            match.asin = asin
+            match.match_confidence = UPC_MATCH_CONFIDENCE
+        else:
+            match.asin = asin
+            match.match_source = MatchSource.MANUAL
+            match.match_confidence = None  # a manual override has no fuzzy-match confidence score to report
+    elif match.asin is None:
+        raise MatchConfirmationError(f"product_match {match_id} has no proposed ASIN - pass the ASIN to confirm explicitly")
     match.match_status = MatchStatus.CONFIRMED
     match.confirmed_by = confirmed_by
     match.confirmed_at = datetime.now(UTC)

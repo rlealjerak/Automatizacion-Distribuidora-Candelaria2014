@@ -50,3 +50,38 @@ def test_none_or_empty_fails():
 
 def test_whitespace_is_tolerated():
     assert validate_upc_ean_check_digit("  8411061088180  ") is True
+
+
+# --- normalize_upc (added 2026-11-14, Codex review on PR #14) ---
+
+from adc_backend.modules.matching.upc import normalize_upc  # noqa: E402
+
+
+def test_normalize_restores_stripped_leading_zero_on_real_mtz_upc():
+    # 022548419953 is one of the real MTZ barcodes above; a numeric Excel
+    # cell hands it over as 22548419953.
+    assert normalize_upc("22548419953") == "022548419953"
+    assert validate_upc_ean_check_digit(normalize_upc("22548419953"))
+
+
+def test_normalize_handles_float_rendering_and_separators():
+    assert normalize_upc("22548419953.0") == "022548419953"
+    assert normalize_upc(" 0 22548 41995 3 ") == "022548419953"
+    assert normalize_upc("8411061-088180") == "8411061088180"
+
+
+def test_normalize_leaves_valid_codes_untouched():
+    for code in REAL_MTZ_BARCODES:
+        assert normalize_upc(code) == code
+
+
+def test_normalize_never_pads_into_a_false_valid_barcode():
+    # Flip the check digit of the real code - padding must not rescue it.
+    assert not validate_upc_ean_check_digit(normalize_upc("22548419954"))
+    assert normalize_upc("12345") == "12345"  # too short to be any barcode - returned as-is, fails validation later
+
+
+def test_normalize_empty_and_non_numeric():
+    assert normalize_upc(None) is None
+    assert normalize_upc("   ") is None
+    assert normalize_upc("N/A") == "N/A"

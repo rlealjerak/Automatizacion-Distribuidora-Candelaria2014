@@ -95,6 +95,13 @@ def determine_review_reason(state: LineItemReviewState) -> tuple[ReviewReason, s
                     "in the Amazon data snapshot before deciding."
                 ),
             )
+        velocity = next(
+            (entry for entry in (state.classification_trace or []) if entry.get("rule") == "sales_velocity"), None
+        )
+        if velocity is not None and velocity.get("result") == "fail":
+            if (velocity.get("inputs") or {}).get("sales_rank_drops_30d") is None:
+                return ReviewReason.OTHER, "No Keepa sales-velocity data for this ASIN - financials pass, but demand can't be confirmed."
+            return ReviewReason.OTHER, "Sales velocity is below the configured minimum - financials pass, but demand looks weak."
         return ReviewReason.OTHER, "Rule engine returned REVIEW - see the classification's rule_trace for the specific reason."
 
     return None

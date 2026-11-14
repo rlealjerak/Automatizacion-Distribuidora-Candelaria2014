@@ -30,6 +30,8 @@ mistakes sales_rank_drops_30d for an actual sold-units count later.
 
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -39,6 +41,21 @@ from adc_backend.config import get_secret, get_settings
 
 KEEPA_BASE_URL = "https://api.keepa.com"
 AMAZON_COM_DOMAIN_ID = 1  # Keepa's numeric code for the US marketplace - the only one this system uses
+
+# Token pacing (added 2026-11-14). The real account's plan refills
+# 1 token/minute into a 60-token bucket (confirmed live via /token:
+# refillRate=1), and every product lookup costs a token. Owner decision:
+# keep that plan and *wait* for tokens rather than skip Keepa - a skipped
+# lookup now routes the item to REVIEW (engine.py missing_velocity_action),
+# so skipping would quietly turn demand data gaps into review workload.
+# Keepa reports tokensLeft/refillIn on every response, including its 429
+# "out of tokens" one, so the client paces itself off real numbers rather
+# than a guessed rate.
+MAX_TOKEN_WAIT_RETRIES = 5
+MAX_SINGLE_WAIT_SECONDS = 120.0
+MIN_SINGLE_WAIT_SECONDS = 1.0
+
+logger = logging.getLogger(__name__)
 
 # Keepa timestamps are minutes since 2011-01-01 00:00 UTC ("Keepa time");
 # not decoded here since nothing downstream needs absolute history
@@ -64,27 +81,83 @@ class KeepaSnapshot:
 
 
 class KeepaClient:
-    def __init__(self, http_client: httpx.Client | None = None):
+    def __init__(self, http_client: httpx.Client | None = None, sleep_fn=time.sleep):
         self._http = http_client or httpx.Client(timeout=30.0)
+        self._sleep = sleep_fn
+        # Fetched once per client instance (one instance per run, see
+        # worker.py), not once per lookup - config.get_secret()
+        # deliberately doesn't cache, and a 3,000+ row run shouldn't make
+        # thousands of Secrets Manager calls for a value that can't change
+        # mid-run in any way that matters.
+        self._cached_api_key: str | None = None
+        # Last-known token state from Keepa's own response fields.
+        self._tokens_left: int | None = None
+        self._refill_in_ms: int | None = None
+        self.token_wait_seconds = 0.0  # total time spent waiting on refills this run - reported like SP-API's retry count
+        self.lookup_count = 0  # product lookups attempted (~= tokens spent)
 
     def _api_key(self) -> str:
-        settings = get_settings()
-        return get_secret(settings.keepa_secret_name)["api_key"]
+        if self._cached_api_key is None:
+            settings = get_settings()
+            self._cached_api_key = get_secret(settings.keepa_secret_name)["api_key"]
+        return self._cached_api_key
+
+    def _wait_seconds_from_refill(self) -> float:
+        refill_ms = self._refill_in_ms if self._refill_in_ms is not None else 60_000
+        return min(MAX_SINGLE_WAIT_SECONDS, max(MIN_SINGLE_WAIT_SECONDS, refill_ms / 1000.0))
+
+    def _wait(self, seconds: float) -> None:
+        self._sleep(seconds)
+        self.token_wait_seconds += seconds
+
+    def _record_token_state(self, body: dict) -> None:
+        if isinstance(body.get("tokensLeft"), int):
+            self._tokens_left = body["tokensLeft"]
+        if isinstance(body.get("refillIn"), int):
+            self._refill_in_ms = body["refillIn"]
 
     def get_product(self, asin: str, stats_days: int = 90) -> KeepaSnapshot:
-        response = self._http.get(
-            f"{KEEPA_BASE_URL}/product",
-            params={
-                "key": self._api_key(),
-                "domain": AMAZON_COM_DOMAIN_ID,
-                "asin": asin,
-                "stats": stats_days,
-            },
-        )
-        if response.status_code >= 400:
-            raise KeepaError(f"Keepa product lookup failed for {asin}: {response.status_code} {response.text}")
+        # Pre-emptive: if the last response said the bucket is empty, wait
+        # for the refill Keepa itself announced instead of spending a
+        # request on a guaranteed 429.
+        if self._tokens_left is not None and self._tokens_left < 1:
+            self._wait(self._wait_seconds_from_refill())
 
-        body = response.json()
+        self.lookup_count += 1
+        attempt = 0
+        while True:
+            response = self._http.get(
+                f"{KEEPA_BASE_URL}/product",
+                params={
+                    "key": self._api_key(),
+                    "domain": AMAZON_COM_DOMAIN_ID,
+                    "asin": asin,
+                    "stats": stats_days,
+                },
+            )
+            try:
+                body = response.json()
+            except ValueError:
+                body = {}
+            if isinstance(body, dict):
+                self._record_token_state(body)
+
+            if response.status_code == 429:
+                if attempt >= MAX_TOKEN_WAIT_RETRIES:
+                    raise KeepaError(f"Keepa out of tokens for {asin} - still throttled after {MAX_TOKEN_WAIT_RETRIES} waits")
+                wait = self._wait_seconds_from_refill()
+                logger.info("Keepa out of tokens (tokensLeft=%s) - waiting %.1fs for refill", self._tokens_left, wait)
+                self._wait(wait)
+                attempt += 1
+                continue
+            break
+
+        if response.status_code >= 400:
+            # Response text deliberately not echoed: Keepa error bodies are
+            # safe today, but this message ends up in logs and the request
+            # itself carries the key as a query param.
+            raise KeepaError(f"Keepa product lookup failed for {asin}: HTTP {response.status_code}")
+
         products = body.get("products") or []
         if not products:
             raise KeepaError(f"Keepa returned no product data for {asin} - invalid ASIN or not tracked yet")

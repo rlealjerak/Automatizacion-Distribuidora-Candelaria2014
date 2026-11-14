@@ -427,3 +427,55 @@ def test_fuzzy_fallback_uses_cleaned_description_for_the_search_call(db_session)
         description="212 3.4 EDT L  (100010) - Spain - 20pcs ByBox", brand=None, upc=None,
     )
     assert seen_keywords["value"] == "212 3.4 EDT L"
+
+
+# --- confirming a multi-UPC candidate (added 2026-11-14, Codex review on PR #14) ---
+
+
+def _multi_upc_match(db_session):
+    from adc_backend.modules.matching.engine import find_or_propose_match
+
+    supplier = _make_supplier(db_session)
+    stub = _StubSPAPIClient(
+        identifier_candidates=[
+            CatalogMatch(asin="B0FIRST", title="x", brand=None),
+            CatalogMatch(asin="B0SECOND", title="y", brand=None),
+        ]
+    )
+    return find_or_propose_match(
+        db_session, stub, supplier_id=supplier.id, supplier_item_number=f"MTZ-{uuid.uuid4().hex[:6]}",
+        description="anything", brand=None, upc=REAL_UPC,
+    )
+
+
+def test_confirming_one_of_the_upc_candidates_keeps_upc_source(db_session):
+    from adc_backend.modules.matching.engine import confirm_match
+    from adc_backend.modules.matching.models import MatchSource, MatchStatus
+
+    proposed = _multi_upc_match(db_session)
+    confirmed = confirm_match(db_session, proposed.id, confirmed_by="owner", asin="B0SECOND")
+    assert confirmed.asin == "B0SECOND"
+    assert confirmed.match_source == MatchSource.UPC
+    assert float(confirmed.match_confidence) == 1.0
+    assert confirmed.match_status == MatchStatus.CONFIRMED
+    assert confirmed.candidate_asins == ["B0FIRST", "B0SECOND"]  # kept as the record of the choice
+
+
+def test_confirming_an_asin_outside_the_candidates_is_a_manual_override(db_session):
+    from adc_backend.modules.matching.engine import confirm_match
+    from adc_backend.modules.matching.models import MatchSource
+
+    proposed = _multi_upc_match(db_session)
+    confirmed = confirm_match(db_session, proposed.id, confirmed_by="owner", asin="B0ELSEWHERE")
+    assert confirmed.match_source == MatchSource.MANUAL
+    assert confirmed.match_confidence is None
+
+
+def test_confirming_without_any_asin_is_rejected(db_session):
+    from adc_backend.modules.matching.engine import MatchConfirmationError, confirm_match
+    from adc_backend.modules.matching.models import MatchStatus
+
+    proposed = _multi_upc_match(db_session)
+    with pytest.raises(MatchConfirmationError):
+        confirm_match(db_session, proposed.id, confirmed_by="owner")
+    assert proposed.match_status == MatchStatus.PROPOSED  # a null-ASIN match can never become CONFIRMED

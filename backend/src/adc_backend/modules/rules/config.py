@@ -34,6 +34,11 @@ DEFAULT_RULES_CONFIG: dict = {
     # for "how often this ASIN's rank improved in the last 30 days," which
     # correlates with sales frequency without being a literal unit count.
     "sales_rank_drops_30d_min": 40,
+    # What to do when Keepa has no velocity data at all for an ASIN:
+    # "review" (default, owner decision 2026-11-14 - missing data is
+    # ambiguous, never a pass) or "proceed" (classify as if velocity
+    # passed, flagged with a risk line - the pre-2026-11-14 behavior).
+    "missing_velocity_action": "review",
     # Seller count is a risk-scoring input, not a cutoff (CLAUDE.md is
     # explicit about this one).
     "seller_count_low_risk_max": 3,

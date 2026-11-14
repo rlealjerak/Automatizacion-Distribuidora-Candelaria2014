@@ -304,6 +304,24 @@ def classify(inputs: ClassificationInputs, config: dict) -> ClassificationDecisi
         )
         if not velocity_ok:
             return ClassificationDecision(ClassificationLabel.REVIEW, roi_pct, margin_pct, [e.to_dict() for e in trace])
+    elif config.get("missing_velocity_action", "review") == "review":
+        # Decided 2026-11-14 (owner): no sales data is an ambiguous case,
+        # not a pass - CLAUDE.md's ">=50 units/month" rule can't be
+        # evaluated at all, and "any genuinely ambiguous case -> manual
+        # review, never guess." Previously this fell through to BUY with
+        # only a risk line. A missing key in an already-stored config
+        # (every config seeded before this date) means "review", so the
+        # safer behavior applies without needing a config migration;
+        # set "proceed" to restore the old behavior.
+        trace.append(
+            RuleTraceEntry(
+                rule="sales_velocity",
+                result="fail",
+                reasoning="No Keepa velocity data available for this ASIN - routed to manual review instead of assuming it sells.",
+                inputs={"sales_rank_drops_30d": None, "minimum": velocity_min},
+            )
+        )
+        return ClassificationDecision(ClassificationLabel.REVIEW, roi_pct, margin_pct, [e.to_dict() for e in trace])
     else:
         trace.append(
             RuleTraceEntry(

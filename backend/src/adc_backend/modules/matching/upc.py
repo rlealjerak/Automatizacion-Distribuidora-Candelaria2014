@@ -21,6 +21,38 @@ UPC_A_LENGTH = 12
 EAN_13_LENGTH = 13
 
 
+def normalize_upc(raw: str | None) -> str | None:
+    """
+    Recovers a barcode from the forms spreadsheet tooling commonly mangles
+    it into, before check-digit validation sees it (Codex review on PR #14):
+    a float rendering (`22548419953.0`), separators (`0 22548 41995 3`),
+    and - the important one - a stripped leading zero (11 digits for a
+    12-digit UPC-A, 12 for a 13-digit EAN). A padded candidate is only
+    accepted if it then passes the real GS1 check digit, so padding never
+    turns an arbitrary short number into a "valid" barcode by accident.
+    Anything unrecoverable is returned stripped but otherwise unchanged -
+    validation downstream rejects it and matching falls back to text.
+    """
+    if raw is None:
+        return None
+    code = raw.strip()
+    if not code:
+        return None
+    if code.endswith(".0") and code[:-2].isdigit():
+        code = code[:-2]
+    compact = code.replace(" ", "").replace("-", "")
+    if not compact.isdigit():
+        return code
+    if len(compact) in (UPC_A_LENGTH, EAN_13_LENGTH) and validate_upc_ean_check_digit(compact):
+        return compact
+    for target_length in (UPC_A_LENGTH, EAN_13_LENGTH):
+        if len(compact) < target_length:
+            padded = compact.zfill(target_length)
+            if validate_upc_ean_check_digit(padded):
+                return padded
+    return compact
+
+
 def identifier_type_for_upc(code: str) -> str | None:
     """SP-API's identifiersType value for a validated code, or None if not a recognized length."""
     length = len(code)

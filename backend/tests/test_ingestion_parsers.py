@@ -136,3 +136,19 @@ def test_parse_pdf_no_tables_warns_not_crashes():
     result = parse_pdf(buf.getvalue())
     assert result.rows == []
     assert any("No tables detected" in w for w in result.warnings)
+
+
+def test_parse_excel_keeps_leading_zero_of_numeric_upc_with_zero_format():
+    # Codex review on PR #14: a UPC stored as a number with a
+    # "000000000000" display format came through as 11 digits.
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["ITEM", "UPC", "PRICE"])
+    ws.append(["A1", 22548419953, 13.5])
+    ws["B2"].number_format = "000000000000"
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    result = parse_excel(buf.getvalue())
+    assert result.rows[0].raw_data["UPC"] == "022548419953"
+    assert result.rows[0].raw_data["PRICE"] == "13.5"  # non-zero-format numeric cells unchanged

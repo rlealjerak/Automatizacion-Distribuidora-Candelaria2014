@@ -57,6 +57,7 @@ def test_classify_line_item_persists_result_and_is_rerunnable(db_session):
         referral_fee=Decimal("3.00"),
         fba_fee=Decimal("2.00"),
         seller_count=2,
+        sales_rank_drops_30d=100,  # missing velocity routes to REVIEW since 2026-11-14
     )
     db_session.add(snapshot)
     db_session.flush()
