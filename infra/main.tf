@@ -165,3 +165,34 @@ module "eventbridge_scheduler" {
   public_subnet_ids     = module.network.public_subnet_ids
   ecs_security_group_id = module.network.ecs_security_group_id
 }
+
+# Created by hand 2026-10-10, brought under Terraform 2026-11-14 - see
+# modules/secrets/main.tf's aws_secretsmanager_secret.openclaw_gateway_token.
+import {
+  to = module.secrets.aws_secretsmanager_secret.openclaw_gateway_token
+  id = "arn:aws:secretsmanager:us-east-1:617464676572:secret:adc/prod/openclaw-gateway-token-jJqI7I"
+}
+
+# The Telegram approval bot - see modules/openclaw/main.tf's docstring and
+# docs/openclaw/OPENCLAW_DEPLOYMENT_PLAN.md. First apply is two-pass: the
+# ECR repo has to exist (and hold an image) before the service can start -
+# `-target=module.openclaw.aws_ecr_repository.openclaw`, push the image
+# built from openclaw/Dockerfile, then a normal apply.
+module "openclaw" {
+  source = "./modules/openclaw"
+
+  project_name = var.project_name
+  environment  = var.environment
+  aws_region   = var.aws_region
+
+  vpc_id             = module.network.vpc_id
+  public_subnet_ids  = module.network.public_subnet_ids
+  private_subnet_ids = module.network.private_subnet_ids
+  cluster_arn        = module.ecs_cluster.cluster_arn
+  image_tag          = var.openclaw_image_tag
+
+  anthropic_secret_arn     = module.secrets.openclaw_anthropic_key_secret_arn
+  gateway_token_secret_arn = module.secrets.openclaw_gateway_token_secret_arn
+  telegram_secret_arn      = module.secrets.telegram_reminder_secret_arn
+  backend_token_secret_arn = module.secrets.openclaw_backend_token_secret_arn
+}

@@ -61,9 +61,9 @@ variable "db_deletion_protection" {
 }
 
 variable "db_skip_final_snapshot" {
-  description = "Mirrors db_deletion_protection - flip to false once this is handling real supplier lists."
+  description = "False since 2026-11-14 - this now holds real supplier lists (the full MTZ price list) and approval history, so a deletion must leave a final snapshot behind. Flipped alongside deletion_protection's earlier change, which it was always meant to mirror."
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "db_backup_retention_period" {
@@ -130,4 +130,10 @@ variable "backend_subdomain" {
   description = "Subdomain label the backend API is served at, e.g. \"api\" for api.<domain_name>."
   type        = string
   default     = "api"
+}
+
+variable "openclaw_image_tag" {
+  description = "Tag in the adc-prod-openclaw ECR repo (immutable tags) - explicit versions oc1, oc2, ..., bumped by hand per deploy, same pattern as container_image_tag. Built from openclaw/Dockerfile."
+  type        = string
+  default     = "oc1"
 }

@@ -45,3 +45,7 @@ output "openclaw_anthropic_key_secret_arn" {
 output "openclaw_anthropic_key_secret_name" {
   value = aws_secretsmanager_secret.openclaw_anthropic_key.name
 }
+
+output "openclaw_gateway_token_secret_arn" {
+  value = aws_secretsmanager_secret.openclaw_gateway_token.arn
+}

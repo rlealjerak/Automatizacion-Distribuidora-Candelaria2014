@@ -1,0 +1,44 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EfsForOpenClawState",
+      "Effect": "Allow",
+      "Action": [
+        "elasticfilesystem:CreateFileSystem",
+        "elasticfilesystem:DeleteFileSystem",
+        "elasticfilesystem:DescribeFileSystems",
+        "elasticfilesystem:UpdateFileSystem",
+        "elasticfilesystem:CreateMountTarget",
+        "elasticfilesystem:DeleteMountTarget",
+        "elasticfilesystem:DescribeMountTargets",
+        "elasticfilesystem:DescribeMountTargetSecurityGroups",
+        "elasticfilesystem:ModifyMountTargetSecurityGroups",
+        "elasticfilesystem:CreateAccessPoint",
+        "elasticfilesystem:DeleteAccessPoint",
+        "elasticfilesystem:DescribeAccessPoints",
+        "elasticfilesystem:DescribeLifecycleConfiguration",
+        "elasticfilesystem:PutLifecycleConfiguration",
+        "elasticfilesystem:DescribeBackupPolicy",
+        "elasticfilesystem:PutBackupPolicy",
+        "elasticfilesystem:DescribeFileSystemPolicy",
+        "elasticfilesystem:TagResource",
+        "elasticfilesystem:UntagResource",
+        "elasticfilesystem:ListTagsForResource"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "EcsListAndExec",
+      "Effect": "Allow",
+      "Action": ["ecs:ListServices", "ecs:ListTasks", "ecs:ExecuteCommand"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "LogsFilterScoped",
+      "Effect": "Allow",
+      "Action": ["logs:FilterLogEvents"],
+      "Resource": "arn:aws:logs:us-east-1:617464676572:log-group:/ecs/adc-*"
+    }
+  ]
+}

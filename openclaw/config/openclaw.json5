@@ -35,12 +35,21 @@
       // Defense-in-depth on top of pairing, per OPENCLAW_TECHNICAL_SPEC.md
       // Section 1's recommendation - confirmed as a real schema key
       // (`channels.telegram.allowFrom`) via `openclaw config schema`.
-      // STILL EMPTY: fill with the client's and Rob's numeric Telegram
-      // user IDs once collected (see ../README.md's "Collecting
-      // Telegram user IDs" section - this is the one open item blocking
-      // a meaningful value here).
-      allowFrom: [],
+      // Filled 2026-11-14 with the two IDs the project owner provided,
+      // both confirmed via Telegram's getChat as real private chats that
+      // have already started this bot: 939796663 = the client (Juan),
+      // 8363208465 = Rob (project owner).
+      allowFrom: ["939796663", "8363208465"],
     },
+  },
+
+  // Who may run owner-level chat commands (e.g. approving a new pairing
+  // request) - flagged by the image's own `doctor` on first boot
+  // (2026-11-14): "No command owner is configured." Rob only, not the
+  // client: the client approves purchases, Rob administers the bot.
+  // Chat allowlists above don't grant this.
+  commands: {
+    ownerAllowFrom: ["telegram:8363208465"],
   },
 
   // Belt-and-suspenders hardening beyond `tools.profile: "minimal"` -
